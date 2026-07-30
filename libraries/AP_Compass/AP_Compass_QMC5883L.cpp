@@ -95,9 +95,9 @@ bool AP_Compass_QMC5883L::init()
     _dump_registers();
 #endif
 
-    if(!_check_whoami()){
-    	 goto fail;
-    }
+    // if(!_check_whoami()){
+    // 	 goto fail;
+    // }
 
     if (!_dev->write_register(0x0B, 0x01)||
     	 !_dev->write_register(0x20, 0x40)||
@@ -150,10 +150,10 @@ bool AP_Compass_QMC5883L::_check_whoami()
       		whoami != 0x01){
     	return false;
     }
-    if (!_dev->read_registers(QMC5883L_REG_ID, &whoami,1)||
-    		whoami != QMC5883_ID_VAL){
-    	return false;
-    }
+    // if (!_dev->read_registers(QMC5883L_REG_ID, &whoami,1)||
+    // 		whoami != QMC5883_ID_VAL){
+    // 	return false;
+    // }
     return true;
 }
 
