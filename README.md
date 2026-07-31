@@ -91,7 +91,7 @@ SD/FATFS实验没有修改这条控制链路。
 该工作树示例路径为：
 
 ```bash
-cd /home/xk/ardupilot-worktrees/no-sd-fatfs
+cd $HOME/ardupilot-worktrees/no-sd-fatfs
 ```
 
 先做源码检查：
@@ -105,15 +105,15 @@ python3 Tools/scripts/verify_matekf405_nosd.py --source-only
 ```bash
 mkdir -p /tmp/ardupilot-ccache /tmp/ardupilot-ccache-tmp
 
-env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
   CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
-  /home/xk/ardupilot/venv/bin/python waf configure --board MatekF405
+  $HOME/ardupilot/venv/bin/python waf configure --board MatekF405
 
-env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
   CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
-  /home/xk/ardupilot/venv/bin/python waf copter -j4
+  $HOME/ardupilot/venv/bin/python waf copter -j4
 ```
 
 构建后验证生成配置：

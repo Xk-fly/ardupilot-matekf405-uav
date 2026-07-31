@@ -4,7 +4,7 @@
 
 适用场景：
 
-- 当前源码目录：`/home/xk/ardupilot`
+- 当前源码目录：`$HOME/ardupilot`
 - 系统：WSL2 Ubuntu 22.04
 - 目标飞控板：`MatekF405`
 - 目标固件：ArduCopter
@@ -48,7 +48,7 @@ ccache 4.5.1
 Python 虚拟环境：
 
 ```bash
-/home/xk/ardupilot/venv/bin/python
+$HOME/ardupilot/venv/bin/python
 ```
 
 已验证 `venv` 中这些关键 Python 包可用：
@@ -101,7 +101,7 @@ sudo apt-get clean
 进入源码目录：
 
 ```bash
-cd /home/xk/ardupilot
+cd $HOME/ardupilot
 ```
 
 检查 `venv`：
@@ -129,12 +129,12 @@ venv ok
 如果迁移过源码、换过系统、清理过 `build/`，建议重新配置一次：
 
 ```bash
-cd /home/xk/ardupilot
+cd $HOME/ardupilot
 mkdir -p /tmp/ardupilot-ccache /tmp/ardupilot-ccache-tmp
 ```
 
 ```bash
-env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
   CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
   venv/bin/python waf configure --board MatekF405
@@ -156,9 +156,9 @@ CXX Compiler                             : g++ 10.3.1
 推荐以后都使用下面这条命令编译 Copter 固件：
 
 ```bash
-cd /home/xk/ardupilot
+cd $HOME/ardupilot
 mkdir -p /tmp/ardupilot-ccache /tmp/ardupilot-ccache-tmp
-env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
   CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
   venv/bin/python waf copter -j4
@@ -166,7 +166,7 @@ env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
 
 解释：
 
-- `PATH=/home/xk/ardupilot/venv/bin:...` 确保构建脚本调用的是 `venv` 里的 Python。
+- `PATH=$HOME/ardupilot/venv/bin:...` 确保构建脚本调用的是 `venv` 里的 Python。
 - `/usr/lib/ccache` 放在前面，让编译器通过 ccache 加速。
 - `CCACHE_DIR=/tmp/ardupilot-ccache` 把缓存放到 `/tmp`，避免 WSL2 或沙箱环境中 `/run/user/1000` 只读导致失败。
 - `-j4` 表示 4 线程编译，适合当前 4 核 WSL 环境。
@@ -215,14 +215,14 @@ Free Flash:        27908 B
 如果迁移环境后需要清理 MatekF405 的旧产物，可以只清理 MatekF405：
 
 ```bash
-cd /home/xk/ardupilot
+cd $HOME/ardupilot
 rm -rf build/MatekF405 build/c4che/MatekF405_cache.py
 ```
 
 然后重新执行：
 
 ```bash
-env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
   CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
   venv/bin/python waf configure --board MatekF405
@@ -231,7 +231,7 @@ env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
 再编译：
 
 ```bash
-env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
   CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
   venv/bin/python waf copter -j4
@@ -279,7 +279,7 @@ ModuleNotFoundError: No module named 'intelhex'
 确保编译命令中 `PATH` 以 `venv/bin` 开头：
 
 ```bash
-PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin
+PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin
 ```
 
 本文推荐命令已经包含这个设置。
@@ -305,7 +305,7 @@ WSL2 默认可能把 Windows 的 PATH 加进来，例如 `/mnt/c/...`。这可�
 日常编译使用本文推荐的 `env PATH=...` 命令，显式限制 PATH：
 
 ```bash
-PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin
+PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin
 ```
 
 ### 5. ROS 环境隔离
@@ -350,14 +350,14 @@ M libraries/AP_HAL_ChibiOS/hwdef/MatekF405/hwdef.dat
 进入目录：
 
 ```bash
-cd /home/xk/ardupilot
+cd $HOME/ardupilot
 ```
 
 第一次或清理后配置：
 
 ```bash
 mkdir -p /tmp/ardupilot-ccache /tmp/ardupilot-ccache-tmp
-env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
   CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
   venv/bin/python waf configure --board MatekF405
@@ -366,7 +366,7 @@ env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
 编译：
 
 ```bash
-env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
   CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
   venv/bin/python waf copter -j4
@@ -390,7 +390,7 @@ arducopter_with_bl.hex
   更省事的日常写法
   你可以进入一次环境，然后后面就像以前一样用 ./waf：
 
-  cd /home/xk/ardupilot
+  cd $HOME/ardupilot
   source venv/bin/activate
   mkdir -p /tmp/ardupilot-ccache /tmp/ardupilot-ccache-tmp
   export PATH="$VIRTUAL_ENV/bin:/usr/lib/ccache:/usr/bin:/bin"
