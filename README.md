@@ -1,22 +1,25 @@
-# MatekF405 UAV：云台稳定基线（ArduCopter 4.5.7）
+# MatekF405-UAV：独立板级 Target（ArduCopter 4.5.7）
 
-> 当前分支：`project/matekf405-gimbal-ap457`
+> 当前分支：`feature/matekf405-uav-target`
 >
 > 稳定标签：`baseline/matekf405-gimbal-sd-20260730`
 >
 > 上游基线：ArduCopter 4.5.7，提交 `2a3dc4b7`
 
-这是基于 ArduPilot 4.5.7 的 MatekF405 四旋翼定制固件。该分支保留了已经在“无人机云台电机模块”项目中完成实机验证的 **RC9 → M5/M6 → RZ7889 → 空心杯电机** 云台控制链路，同时保留光流、测距、GPS、EKF3、日志和必要安全功能。
+这是基于 ArduPilot 4.5.7 的 MatekF405 四旋翼定制固件。该分支把项目差异从通用 `MatekF405` 中迁移到独立 `MatekF405-UAV` Target，并保留已经在“无人机云台电机模块”项目中完成实机验证的 **RC9 → M5/M6 → RZ7889 → 空心杯电机** 云台链路。
 
-This branch is a hardware-tested MatekF405/ArduCopter 4.5.7 baseline with RC9-controlled bidirectional brushed-gimbal output through an RZ7889 driver.
+This branch adds an inherited `MatekF405-UAV` board target while preserving the hardware-tested RC9-controlled RZ7889 brushed-gimbal implementation.
+
+> **当前验证边界：** 云台控制链路已有实机验证；新 Target 已通过源码配置、应用固件编译和 bootloader 编译，但尚未在飞控上完成刷写与飞行验证。
 
 ## 1. 分支用途
 
-该分支是后续开发的稳定起点，主要用于：
+该分支是后续开发的正式板级起点，主要用于：
 
 - 保存已验证云台控制方案；
-- 保存 MatekF405 的当前编译裁剪和传感器支持；
-- 为独立 `MatekF405-UAV` 板级 Target 提供可回滚基线；
+- 让通用 `MatekF405` 恢复上游4.5.7板级定义；
+- 通过继承建立独立 `MatekF405-UAV` 板级Target；
+- 保存本机GPIO、PWM、光流、测距、iBUS、罗盘和功能裁剪；
 - 与无 SD 实验、罗盘修复和飞行算法实验隔离。
 
 该分支不是最新 ArduPilot `master`，也不应直接与最新上游固件混刷。
@@ -87,13 +90,29 @@ M6 / PA8  / TIM1_CH1 ──→ RZ7889 B1
 | 文件 | 作用 |
 |---|---|
 | `ArduCopter/UserCode.cpp` | RC9、M5/M6、1 kHz硬件PWM、密度调速和失效保护 |
-| `ArduCopter/APM_Config.h` | 启用所需 UserHook |
-| `ArduCopter/config.h` | 小容量F405功能选择 |
-| `libraries/AP_HAL_ChibiOS/hwdef/MatekF405/hwdef.dat` | 当前板级GPIO、PWM、传感器及功能裁剪 |
+| `ArduCopter/APM_Config.h` | 只对 `MatekF405-UAV` 启用所需UserHook |
+| `libraries/AP_HAL_ChibiOS/hwdef/MatekF405-UAV/hwdef.dat` | 继承MatekF405并覆盖GPIO、传感器后端和功能裁剪 |
+| `libraries/AP_HAL_ChibiOS/hwdef/MatekF405-UAV/hwdef-bl.dat` | 继承标准bootloader布局，保留Board ID 125 |
+| `libraries/AP_HAL_ChibiOS/hwdef/MatekF405-UAV/defaults.parm` | 新参数存储首次初始化时使用的硬件默认值 |
+| `libraries/AP_Compass/AP_Compass_QMC5883L.cpp` | 恢复上游QMC5883L身份检查；本Target不编译QMC后端 |
 | `BUILD_MatekF405_WSL2.md` | WSL2构建环境和命令 |
 | `MATEKF405_*_ANALYSIS.md` | 云台、光流、起飞门限等设计分析 |
 
-长期结构将把本机差异迁移到独立 `MatekF405-UAV` Target；在该迁移完成前，本分支作为原始可回滚基线保留，不继续重构。
+通用 `MatekF405` 已恢复为ArduCopter 4.5.7定义。本机代码由 `HAL_MATEKF405_UAV` 隔离；构建标准 `MatekF405` 时不会启用云台UserHook。
+
+### 默认参数说明
+
+`defaults.parm`只在参数存储首次初始化时提供默认值。已经使用过的飞控会保留现有参数，刷写后仍需在Mission Planner逐项核对。
+
+已加入的硬件默认值包括：
+
+- `UART2 / Serial5`：iBUS接收机，`BRD_ALT_CONFIG=1`；
+- `UART5 / Serial4`：MAVLink1光流与测距；
+- 外置HMC5883：I2C地址`0x1E`，安装方向暂按`Yaw270`保存；
+- M5/M6：`SERVO5_FUNCTION=94`、`SERVO6_FUNCTION=95`；
+- `ARMING_CHECK=1`，保留SD日志。
+
+没有写入罗盘DevID、罗盘偏置、电池倍率或实验性EKF/Loiter参数，因为这些数值必须在对应实机上校准。
 
 ## 6. 新手构建步骤
 
@@ -106,7 +125,7 @@ mkdir -p /tmp/ardupilot-ccache /tmp/ardupilot-ccache-tmp
 env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
   CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
-  venv/bin/python waf configure --board MatekF405
+  venv/bin/python waf configure --board MatekF405-UAV
 
 env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
@@ -117,12 +136,13 @@ env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
 生成文件：
 
 ```text
-build/MatekF405/bin/arducopter.apj
-build/MatekF405/bin/arducopter.bin
-build/MatekF405/bin/arducopter_with_bl.hex
+build/MatekF405-UAV/bin/arducopter.apj
+build/MatekF405-UAV/bin/arducopter.bin
 ```
 
-Mission Planner 一般选择 `arducopter.apj`。刷写前应先导出当前参数，刷写后逐项确认接收机、光流、测距、罗盘、电池和云台，不能直接带桨飞行。
+Mission Planner选择`arducopter.apj`。第一阶段继续使用飞控中已经验证的标准MatekF405 bootloader；Target保留相同的`APJ_BOARD_ID=125`，但应用固件不内嵌bootloader。**不要在当前阶段刷写`AP_Bootloader.bin`。**
+
+刷写前应先导出当前参数。刷写后拆桨逐项确认接收机、光流、测距、罗盘、电池和云台，不能直接带桨飞行。
 
 ## 7. 回滚方法
 
@@ -144,13 +164,42 @@ git switch -c feature/my-change baseline/matekf405-gimbal-sd-20260730
 |---|---|---|
 | `project/matekf405-gimbal-ap457` | 稳定基线 | 已验证云台及当前MatekF405功能 |
 | `test/matekf405-no-sd-fatfs` | 台架实验 | 关闭SPI SD/FATFS，分析启动延迟 |
-| `feature/matekf405-uav-target` | 开发/验证 | 独立 `MatekF405-UAV` 板级Target |
+| `feature/matekf405-uav-target` | 已编译、待实机 | 独立 `MatekF405-UAV` 板级Target |
 
-## 9. 安全与许可
+## 9. 已完成的构建验证
+
+以下结果来自本分支实际构建，不是预计值：
+
+| 构建 | 结果 | Flash使用/剩余 |
+|---|---|---|
+| `MatekF405-UAV` ArduCopter | 通过 | 899,623 B / 83,412 B |
+| 标准 `MatekF405` ArduCopter | 通过 | 897,943 B / 85,092 B |
+| `MatekF405-UAV` bootloader | 通过 | 14,440 B / 18,328 B |
+
+同时确认：
+
+- APJ Board ID仍为125；
+- SD/FATFS、EKF3、光流、MAVLink测距和日志仍编译；
+- HMC5883后端保留，未使用的QMC5883L后端在本Target关闭；
+- 通用MatekF405仍可独立构建；
+- 构建产物不提交Git，只保留源码、README和构建方法。
+
+## 10. 下一步实机验证
+
+1. 导出当前参数并保存已验证固件；
+2. 拆桨刷写`MatekF405-UAV/arducopter.apj`；
+3. 核对板型、Board ID、串口和RC输入；
+4. 核对M5/M6严格互斥和RC9死区停止；
+5. 核对HMC5883 DevID `466433`、方向和重新校准后的偏置；
+6. 核对光流、测距、SD日志和解锁检查；
+7. 全部通过后才进入低风险离地测试。
+
+## 11. 安全与许可
 
 - 这是特定硬件上的研究/实验固件，不代表 ArduPilot 官方支持；
 - 首次刷写或参数变化后必须拆桨台架验证；
 - 不删除 Arming、EKF、RC、电池、Crash、Thrust Loss 等安全检查；
+- 新Target尚未实机刷写，不能把“编译通过”等同于“飞行验证通过”；
 - ArduPilot 及本派生工作继续遵循 GNU GPL v3，完整许可见 `COPYING.txt`；
 - 原始 ArduPilot 项目及贡献者信息保留在下方。
 
