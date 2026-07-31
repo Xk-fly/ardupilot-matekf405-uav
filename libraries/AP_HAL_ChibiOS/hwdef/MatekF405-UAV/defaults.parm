@@ -1,8 +1,9 @@
 # MatekF405-UAV verified hardware defaults
 #
-# Applied when parameter storage is first initialised. Existing boards keep
-# their saved parameters; compare and apply these values manually after an
-# upgrade. Calibration values and experimental EKF tuning do not belong here.
+# Loaded at every boot. Values already saved in parameter storage override
+# these defaults; parameters that only used old firmware defaults may change
+# after an upgrade. Export and compare parameters before flight. Calibration
+# values and experimental EKF tuning do not belong here.
 
 # FS-i6/FS-A8S iBUS on UART2, exposed by ArduPilot as SERIAL5.
 BRD_ALT_CONFIG 1

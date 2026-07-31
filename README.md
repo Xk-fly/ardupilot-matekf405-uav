@@ -93,7 +93,7 @@ M6 / PA8  / TIM1_CH1 ──→ RZ7889 B1
 | `ArduCopter/APM_Config.h` | 只对 `MatekF405-UAV` 启用所需UserHook |
 | `libraries/AP_HAL_ChibiOS/hwdef/MatekF405-UAV/hwdef.dat` | 继承MatekF405并覆盖GPIO、传感器后端和功能裁剪 |
 | `libraries/AP_HAL_ChibiOS/hwdef/MatekF405-UAV/hwdef-bl.dat` | 继承标准bootloader布局，保留Board ID 125 |
-| `libraries/AP_HAL_ChibiOS/hwdef/MatekF405-UAV/defaults.parm` | 新参数存储首次初始化时使用的硬件默认值 |
+| `libraries/AP_HAL_ChibiOS/hwdef/MatekF405-UAV/defaults.parm` | 每次启动加载、由已保存参数优先覆盖的硬件默认值 |
 | `libraries/AP_Compass/AP_Compass_QMC5883L.cpp` | 恢复上游QMC5883L身份检查；本Target不编译QMC后端 |
 | `BUILD_MatekF405_WSL2.md` | WSL2构建环境和命令 |
 | `MATEKF405_*_ANALYSIS.md` | 云台、光流、起飞门限等设计分析 |
@@ -102,7 +102,7 @@ M6 / PA8  / TIM1_CH1 ──→ RZ7889 B1
 
 ### 默认参数说明
 
-`defaults.parm`只在参数存储首次初始化时提供默认值。已经使用过的飞控会保留现有参数，刷写后仍需在Mission Planner逐项核对。
+`defaults.parm`会在每次启动时加载。飞控参数存储中**已经保存的参数**优先于这些默认值；但从未保存、一直沿用旧固件默认值的参数，升级后可能改用本Target的默认值。因此刷写前应导出参数，刷写后仍需在Mission Planner逐项比较串口、RC、罗盘方向、M5/M6和日志设置。
 
 已加入的硬件默认值包括：
 
@@ -172,8 +172,8 @@ git switch -c feature/my-change baseline/matekf405-gimbal-sd-20260730
 
 | 构建 | 结果 | Flash使用/剩余 |
 |---|---|---|
-| `MatekF405-UAV` ArduCopter | 通过 | 899,623 B / 83,412 B |
-| 标准 `MatekF405` ArduCopter | 通过 | 897,943 B / 85,092 B |
+| `MatekF405-UAV` ArduCopter | 通过 | 899,652 B / 83,388 B |
+| 标准 `MatekF405` ArduCopter | 通过 | 897,948 B / 85,092 B |
 | `MatekF405-UAV` bootloader | 通过 | 14,440 B / 18,328 B |
 
 同时确认：
