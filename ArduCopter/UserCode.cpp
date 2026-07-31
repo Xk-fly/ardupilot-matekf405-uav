@@ -7,7 +7,11 @@
 //   M5 / PA15 / TIM2_CH1 / PWM5 -> RZ7889 A1
 //   M6 / PA8  / TIM1_CH1 / PWM6 -> RZ7889 B1
 // RCOutput owns the timer mode/frequency; SRV_Channels owns all periodic values.
+#if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
 #define GIMBAL_RZ7889_RC9_CONTROL_ENABLED 1
+#else
+#define GIMBAL_RZ7889_RC9_CONTROL_ENABLED 0
+#endif
 #define GIMBAL_PWM5_CH 4U
 #define GIMBAL_PWM6_CH 5U
 #define GIMBAL_PWM_CH_MASK ((1UL << GIMBAL_PWM5_CH) | (1UL << GIMBAL_PWM6_CH))

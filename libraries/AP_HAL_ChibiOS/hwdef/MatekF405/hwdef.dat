@@ -15,7 +15,6 @@ OSCILLATOR_HZ 8000000
 define STM32_ST_USE_TIMER 4
 define CH_CFG_ST_RESOLUTION 16
 
-
 FLASH_SIZE_KB 1024
 
 
@@ -27,11 +26,7 @@ SERIAL_ORDER OTG1 USART3 UART4 USART1 UART5 USART2
 
 # LEDs
 PB9 LED_BLUE OUTPUT LOW GPIO(0)
-# A14 LED_GREEN OUTPUT LOW GPIO(1)
-
-# PB0 LED_GREEN OUTPUT LOW GPIO(1)
-PB0 TEST_PIN_0 OUTPUT LOW GPIO(1)
-PB8 MY_LED OUTPUT LOW GPIO(59)
+PA14 LED_GREEN OUTPUT LOW GPIO(1)
 
 define HAL_GPIO_A_LED_PIN 0
 define HAL_GPIO_B_LED_PIN 1
@@ -123,7 +118,6 @@ PC6  TIM3_CH1 TIM3 PWM(1) GPIO(50)
 PC7  TIM8_CH2 TIM8 PWM(2) GPIO(51)
 PC8  TIM8_CH3 TIM8 PWM(3) GPIO(52)
 PC9  TIM8_CH4 TIM8 PWM(4) GPIO(53)
-# RZ7889 hardware-PWM outputs: M5 and M6 are independent timer groups.
 PA15 TIM2_CH1 TIM2 PWM(5) GPIO(54)
 PA8  TIM1_CH1 TIM1 PWM(6) GPIO(55)
 
@@ -161,57 +155,11 @@ define HAL_OS_FATFS_IO 1
 define OSD_ENABLED 1
 define HAL_OSD_TYPE_DEFAULT 1
 ROMFS_WILDCARD libraries/AP_OSD/fonts/font0.bin
-define HAL_WITH_MSP_DISPLAYPORT 0
-define HAL_OSD_MSP_DISPLAYPORT_ENABLED 0
 
 # disable parachute and sprayer to save flash
 define HAL_PARACHUTE_ENABLED 0
 define HAL_SPRAYER_ENABLED 0
 
 # save some flash
-# include ../include/save_some_flash.inc
-# include ../include/minimize_fpv_osd.inc
-define HAL_PROXIMITY_ENABLED 1
-define HAL_ADSB_ENABLED 0
-define AP_AIS_ENABLED 0
-define AP_ADVANCEDFAILSAFE_ENABLED 0
-define HAL_HIGH_LATENCY2_ENABLED 0
-define HAL_GYROFFT_ENABLED 0
-define HAL_BARO_WIND_COMP_ENABLED 0
-define AP_SCHEDULER_EXTENDED_TASKINFO_ENABLED 0
-define AP_INERTIALSENSOR_KILL_IMU_ENABLED 0
-
-# keep MAVLink, but remove rarely used non-MAVLink telemetry protocols
-define AP_FRSKY_TELEM_ENABLED 0
-define AP_LTM_TELEM_ENABLED 0
-define HAL_HOTT_TELEM_ENABLED 0
-define HAL_SPEKTRUM_TELEM_ENABLED 0
-define AP_GHST_TELEM_ENABLED 0
-
-# no scripting or complex payload/mission helpers on this small aircraft build
-define AP_SCRIPTING_ENABLED 0
-define AP_GRIPPER_ENABLED 0
-define AP_WINCH_ENABLED 0
-define HAL_GENERATOR_ENABLED 0
-define AP_BEACON_ENABLED 0
-define AP_ICENGINE_ENABLED 0
-define AC_PRECLAND_ENABLED 0
-define AC_OAPATHPLANNER_ENABLED 0
-define HAL_NMEA_OUTPUT_ENABLED 0
-define AP_CAN_SLCAN_ENABLED 0
-define AP_MAVLINK_MSG_RELAY_STATUS_ENABLED 0
-define AP_RC_CHANNEL_AUX_FUNCTION_STRINGS_ENABLED 0
-
-# 砍掉云台和相机功能 (省出大量空间)
-define HAL_MOUNT_ENABLED 0
-define HAL_CAMERA_ENABLED 0
-
-# 砍掉不常用的飞行模式
-define MODE_THROW_ENABLED 0
-define MODE_ZIGZAG_ENABLED 0
-define MODE_SYSTEMID_ENABLED 0
-define MODE_SPORT_ENABLED 0
-define MODE_FOLLOW_ENABLED 0
-
-# enable optical flow via MAVLink1 protocol (default to MAVLINK type)
-define OPTICAL_FLOW_TYPE_DEFAULT Type::MAVLINK
+include ../include/save_some_flash.inc
+include ../include/minimize_fpv_osd.inc

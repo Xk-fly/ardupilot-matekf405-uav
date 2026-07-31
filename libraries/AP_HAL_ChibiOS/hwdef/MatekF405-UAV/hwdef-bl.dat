@@ -1,0 +1,10 @@
+# MatekF405-UAV bootloader definition
+#
+# Keep APJ_BOARD_ID 125 and the standard MatekF405 flash layout so the
+# existing verified bootloader remains compatible.
+
+include ../MatekF405/hwdef-bl.dat
+
+# Match the project board's PB0 indicator/test output.
+undef PA14
+PB0 TEST_PIN_0 OUTPUT LOW GPIO(1)
