@@ -100,15 +100,15 @@ M6 / PA8  / TIM1_CH1 ──→ RZ7889 B1
 在 WSL2 Ubuntu 22.04 中：
 
 ```bash
-cd /home/xk/ardupilot
+cd $HOME/ardupilot
 mkdir -p /tmp/ardupilot-ccache /tmp/ardupilot-ccache-tmp
 
-env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
   CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
   venv/bin/python waf configure --board MatekF405
 
-env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+env PATH=$HOME/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
   CCACHE_DIR=/tmp/ardupilot-ccache \
   CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
   venv/bin/python waf copter -j4
