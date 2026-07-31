@@ -1,4 +1,162 @@
-# ArduPilot Project
+# MatekF405 UAV：云台稳定基线（ArduCopter 4.5.7）
+
+> 当前分支：`project/matekf405-gimbal-ap457`
+>
+> 稳定标签：`baseline/matekf405-gimbal-sd-20260730`
+>
+> 上游基线：ArduCopter 4.5.7，提交 `2a3dc4b7`
+
+这是基于 ArduPilot 4.5.7 的 MatekF405 四旋翼定制固件。该分支保留了已经在“无人机云台电机模块”项目中完成实机验证的 **RC9 → M5/M6 → RZ7889 → 空心杯电机** 云台控制链路，同时保留光流、测距、GPS、EKF3、日志和必要安全功能。
+
+This branch is a hardware-tested MatekF405/ArduCopter 4.5.7 baseline with RC9-controlled bidirectional brushed-gimbal output through an RZ7889 driver.
+
+## 1. 分支用途
+
+该分支是后续开发的稳定起点，主要用于：
+
+- 保存已验证云台控制方案；
+- 保存 MatekF405 的当前编译裁剪和传感器支持；
+- 为独立 `MatekF405-UAV` 板级 Target 提供可回滚基线；
+- 与无 SD 实验、罗盘修复和飞行算法实验隔离。
+
+该分支不是最新 ArduPilot `master`，也不应直接与最新上游固件混刷。
+
+## 2. 已验证的云台链路
+
+跨项目测试记录确认了以下链路：
+
+```text
+FS-i6（RC9，自回中通道）
+        ↓ iBUS
+MatekF405 / ArduCopter 4.5.7
+        ↓
+M5 / PA15 / TIM2_CH1 ──→ RZ7889 A1
+M6 / PA8  / TIM1_CH1 ──→ RZ7889 B1
+        ↓
+双向空心杯电机
+```
+
+实机已经验证：
+
+- RC9 范围约为 `1000～2000`；
+- `1420～1580` 死区内电机停止；
+- RC9 两侧可分别控制两个方向；
+- 回到死区后停止，没有上电自转、抖动或停不住；
+- 15% 硬件 PWM 能通过机构全行程的最大负载位置；
+- M5/M6 由代码严格互斥，不允许两路同时驱动。
+
+当前保存的速度方案为：
+
+```text
+硬件载波频率：1000 Hz
+开启阶段占空比：15%
+密度开启：10 ms
+密度停止：50 ms
+自动回中：关闭
+```
+
+1 kHz PWM 由 STM32 硬件定时器产生；10/50 ms 只负责低速密度包络，不是用 GPIO 模拟 1 kHz PWM。
+
+## 3. 失效安全行为
+
+当前实现包含以下保护：
+
+- RC 输入无效或超时：M5、M6 均停止；
+- RC9 回到死区：两路停止；
+- PWM 模式、频率或通道检查失败：禁用两路输出；
+- M5/M6 功能已被其他功能占用：初始化失败并保持停止；
+- 两个方向输出在同一周期共同发布，避免换向时短暂同时导通；
+- 自动回中代码保留但默认关闭，避免无角度反馈时撞击机械限位。
+
+> 云台输出在飞控未解锁时也可工作。拆桨维护时仍应断开云台电机电源，不能把“飞控未解锁”当作云台安全开关。
+
+## 4. 硬件与接口
+
+| 功能 | 接口/引脚 | 说明 |
+|---|---|---|
+| 主电机 1～4 | PWM1～PWM4 | 标准 Quad X 混控 |
+| 云台方向 M5 | PA15 / TIM2_CH1 / PWM5 | 接 RZ7889 A1 |
+| 云台方向 M6 | PA8 / TIM1_CH1 / PWM6 | 接 RZ7889 B1 |
+| 接收机 | UART2 / Serial5 | FS-A8S iBUS，需 `BRD_ALT_CONFIG=1` |
+| 光流/测距 | UART5 / Serial4 | MAVLink OpticalFlow / DistanceSensor |
+| 外置罗盘 | I2C1 | 当前识别为 HMC5883，地址 `0x1E` |
+| 电池电压 | PC5 / ADC1_CH15 | 分压倍率仍需万用表校准 |
+
+## 5. 主要定制文件
+
+| 文件 | 作用 |
+|---|---|
+| `ArduCopter/UserCode.cpp` | RC9、M5/M6、1 kHz硬件PWM、密度调速和失效保护 |
+| `ArduCopter/APM_Config.h` | 启用所需 UserHook |
+| `ArduCopter/config.h` | 小容量F405功能选择 |
+| `libraries/AP_HAL_ChibiOS/hwdef/MatekF405/hwdef.dat` | 当前板级GPIO、PWM、传感器及功能裁剪 |
+| `BUILD_MatekF405_WSL2.md` | WSL2构建环境和命令 |
+| `MATEKF405_*_ANALYSIS.md` | 云台、光流、起飞门限等设计分析 |
+
+长期结构将把本机差异迁移到独立 `MatekF405-UAV` Target；在该迁移完成前，本分支作为原始可回滚基线保留，不继续重构。
+
+## 6. 新手构建步骤
+
+在 WSL2 Ubuntu 22.04 中：
+
+```bash
+cd /home/xk/ardupilot
+mkdir -p /tmp/ardupilot-ccache /tmp/ardupilot-ccache-tmp
+
+env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+  CCACHE_DIR=/tmp/ardupilot-ccache \
+  CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
+  venv/bin/python waf configure --board MatekF405
+
+env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+  CCACHE_DIR=/tmp/ardupilot-ccache \
+  CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
+  venv/bin/python waf copter -j4
+```
+
+生成文件：
+
+```text
+build/MatekF405/bin/arducopter.apj
+build/MatekF405/bin/arducopter.bin
+build/MatekF405/bin/arducopter_with_bl.hex
+```
+
+Mission Planner 一般选择 `arducopter.apj`。刷写前应先导出当前参数，刷写后逐项确认接收机、光流、测距、罗盘、电池和云台，不能直接带桨飞行。
+
+## 7. 回滚方法
+
+查看稳定标签：
+
+```bash
+git show baseline/matekf405-gimbal-sd-20260730
+```
+
+需要从稳定状态重新开发时，应创建新分支，不要在标签上直接工作：
+
+```bash
+git switch -c feature/my-change baseline/matekf405-gimbal-sd-20260730
+```
+
+## 8. 分支地图
+
+| 分支 | 状态 | 作用 |
+|---|---|---|
+| `project/matekf405-gimbal-ap457` | 稳定基线 | 已验证云台及当前MatekF405功能 |
+| `test/matekf405-no-sd-fatfs` | 台架实验 | 关闭SPI SD/FATFS，分析启动延迟 |
+| `feature/matekf405-uav-target` | 开发/验证 | 独立 `MatekF405-UAV` 板级Target |
+
+## 9. 安全与许可
+
+- 这是特定硬件上的研究/实验固件，不代表 ArduPilot 官方支持；
+- 首次刷写或参数变化后必须拆桨台架验证；
+- 不删除 Arming、EKF、RC、电池、Crash、Thrust Loss 等安全检查；
+- ArduPilot 及本派生工作继续遵循 GNU GPL v3，完整许可见 `COPYING.txt`；
+- 原始 ArduPilot 项目及贡献者信息保留在下方。
+
+---
+
+# Upstream ArduPilot Project
 
 <a href="https://ardupilot.org/discord"><img src="https://img.shields.io/discord/674039678562861068.svg" alt="Discord">
 
