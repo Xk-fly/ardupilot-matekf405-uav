@@ -1,4 +1,193 @@
-# ArduPilot Project
+# MatekF405 无SD/FATFS启动实验（ArduCopter 4.5.7）
+
+> 当前分支：`test/matekf405-no-sd-fatfs`
+>
+> 实验标签：`test/matekf405-no-sd-fatfs-20260730`
+>
+> 父分支：`project/matekf405-gimbal-ap457`
+
+这是一个公开的、可回滚的 **台架实验分支**。它在保留RC9云台控制、光流、测距、EKF3和其他当前功能的基础上，仅关闭 MatekF405 的 SPI SD 设备和 FATFS，用于定位“不插SD卡时启动仍然很慢”的原因。
+
+> 该分支不是当前飞行稳定基线。关闭SD/FATFS后不会生成SD卡飞行日志，不应在完成替代日志方案前作为常规飞行固件。
+
+## 1. 为什么建立这个分支
+
+原始现象：MatekF405 在没有插入 SD 卡时，`Initialising ArduPilot` 持续数分钟。源码分析发现 ChibiOS BoardConfig 会反复尝试挂载 SPI SD/FATFS。
+
+为避免把启动实验混入已验证云台基线，单独建立了本分支，只改变SD/FATFS相关板级定义。
+
+## 2. 本分支改了什么
+
+文件：
+
+```text
+libraries/AP_HAL_ChibiOS/hwdef/MatekF405/hwdef.dat
+```
+
+改动：
+
+```text
+不再注册名为 sdcard 的 SPI3 设备
+不再定义 HAL_OS_FATFS_IO=1
+生成阶段应得到 USE_FATFS=no
+```
+
+本分支没有删除：
+
+- 云台RC9控制；
+- M5/M6硬件PWM；
+- 光流和测距；
+- EKF3；
+- MAVLink；
+- 罗盘、气压计和IMU；
+- Arming与飞行安全检查。
+
+## 3. 已有测试结论
+
+台架启动测试显示：
+
+```text
+原启动时间：约280秒
+关闭SD/FATFS后：约155秒
+缩短：约125秒
+```
+
+这证明SD/FATFS重试是启动延迟的一部分，但不是全部。
+
+剩余约150秒已经进一步对应到 MAX7456 模拟OSD字体NVM Busy超时：
+
+```text
+MAX_NVM_WAIT = 10000
+每次等待 = 15 ms
+理论最大等待 = 150秒
+```
+
+因此本分支的结论是：
+
+```text
+SD/FATFS解释约125秒
+MAX7456 OSD异常解释剩余约150秒
+GPS、EKF和云台不是这段启动阻塞的根因
+```
+
+## 4. 云台功能是否还在
+
+在。该实验分支继承已验证的云台基线：
+
+```text
+RC9 1420～1580：停止
+RC9 > 1580：M5方向
+RC9 < 1420：M6方向
+硬件PWM：1000 Hz / 15%
+密度调速：10 ms开启 / 50 ms停止
+自动回中：关闭
+RC失效：两路停止
+```
+
+SD/FATFS实验没有修改这条控制链路。
+
+## 5. 新手构建步骤
+
+该工作树示例路径为：
+
+```bash
+cd /home/xk/ardupilot-worktrees/no-sd-fatfs
+```
+
+先做源码检查：
+
+```bash
+python3 Tools/scripts/verify_matekf405_nosd.py --source-only
+```
+
+再配置和编译：
+
+```bash
+mkdir -p /tmp/ardupilot-ccache /tmp/ardupilot-ccache-tmp
+
+env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+  CCACHE_DIR=/tmp/ardupilot-ccache \
+  CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
+  /home/xk/ardupilot/venv/bin/python waf configure --board MatekF405
+
+env PATH=/home/xk/ardupilot/venv/bin:/usr/lib/ccache:/usr/bin:/bin \
+  CCACHE_DIR=/tmp/ardupilot-ccache \
+  CCACHE_TEMPDIR=/tmp/ardupilot-ccache-tmp \
+  /home/xk/ardupilot/venv/bin/python waf copter -j4
+```
+
+构建后验证生成配置：
+
+```bash
+python3 Tools/scripts/verify_matekf405_nosd.py
+```
+
+验证脚本会检查：
+
+- 源码中没有活动的`SPIDEV sdcard`；
+- 没有活动的`HAL_OS_FATFS_IO=1`；
+- 生成的`hwdef.h`没有MMC-SPI/FATFS宏；
+- 构建环境包含`USE_FATFS=no`。
+
+## 6. 如何刷写和识别
+
+生成固件：
+
+```text
+build/MatekF405/bin/arducopter.apj
+build/MatekF405/bin/arducopter.bin
+```
+
+刷写后应重点确认：
+
+1. 启动时间是否显著缩短；
+2. Mission Planner是否不再显示文件日志能力；
+3. RC9云台控制是否与稳定分支一致；
+4. 光流、测距、罗盘和接收机是否仍正常；
+5. `OSD_TYPE=1`时是否仍出现约150秒延迟。
+
+## 7. 风险和已知限制
+
+- 没有SD卡文件日志，事故后诊断能力明显下降；
+- 模拟OSD异常仍可能造成约150秒启动等待；
+- 该分支只做过台架启动验证，没有替代稳定分支；
+- 不应同时修改GPS、EKF、OSD和SD后再比较启动时间，否则无法定位变量；
+- 如果恢复SD功能，应回到稳定分支，不要手工拼接多组板级改动。
+
+## 8. 回滚
+
+返回稳定云台分支：
+
+```bash
+git switch project/matekf405-gimbal-ap457
+```
+
+或者从稳定标签重新建立分支：
+
+```bash
+git switch -c recovery/matekf405-gimbal baseline/matekf405-gimbal-sd-20260730
+```
+
+## 9. 分支关系
+
+```text
+ArduCopter 4.5.7 / 2a3dc4b7
+        ↓
+project/matekf405-gimbal-ap457   已验证云台稳定基线
+        ↓
+test/matekf405-no-sd-fatfs      仅关闭SD/FATFS的台架实验
+```
+
+## 10. 安全与许可
+
+- 首次刷写必须拆桨测试；
+- 无日志能力的实验固件不建议用于常规飞行；
+- 本分支没有关闭ArduPilot飞行安全检查；
+- ArduPilot及本派生工作遵循GNU GPL v3，完整许可见`COPYING.txt`。
+
+---
+
+# Upstream ArduPilot Project
 
 <a href="https://ardupilot.org/discord"><img src="https://img.shields.io/discord/674039678562861068.svg" alt="Discord">
 
