@@ -1,28 +1,29 @@
-# MatekF405-UAV：独立板级 Target（ArduCopter 4.5.7）
+# MatekF405-UAV：RC9 云台单步点动实验（ArduCopter 4.5.7）
 
-> 当前分支：`feature/matekf405-uav-target`
+> 当前分支：`feature/gimbal-rc9-single-step`
 >
-> 稳定标签：`baseline/matekf405-gimbal-sd-20260730`
+> 父分支：`feature/matekf405-uav-target`
 >
 > 上游基线：ArduCopter 4.5.7，提交 `2a3dc4b7`
 
-这是基于 ArduPilot 4.5.7 的 MatekF405 四旋翼定制固件。该分支把项目差异从通用 `MatekF405` 中迁移到独立 `MatekF405-UAV` Target，并保留已经在“无人机云台电机模块”项目中完成实机验证的 **RC9 → M5/M6 → RZ7889 → 空心杯电机** 云台链路。
+这是基于正式 `MatekF405-UAV` Target创建的云台功能实验分支。它保留已经完成实机验证的 **RC9 → M5/M6 → RZ7889 → 空心杯电机** 硬件链路，并把“长按连续密度调速”改为“每次离开中位只运行一个固定小步”。
 
-This branch adds an inherited `MatekF405-UAV` board target while preserving the hardware-tested RC9-controlled RZ7889 brushed-gimbal implementation.
+This branch tests a one-shot RC9 gimbal step while preserving the hardware-tested MatekF405-UAV/RZ7889 PWM path and fail-safe behavior.
 
-> **当前验证边界：** 云台控制链路已有实机验证；新 Target 已通过源码配置、应用固件编译和 bootloader 编译，但尚未在飞控上完成刷写与飞行验证。
+> **当前验证边界：** 原有云台硬件链路已有实机验证；本分支的单步状态机仅通过源码检查和 `MatekF405-UAV` 编译验证，尚未完成拆桨台架实测，不能标记为实机验证通过。
 
 ## 1. 分支用途
 
-该分支是后续开发的正式板级起点，主要用于：
+该分支只用于验证RC9单步点动控制，主要目标是：
 
-- 保存已验证云台控制方案；
-- 让通用 `MatekF405` 恢复上游4.5.7板级定义；
-- 通过继承建立独立 `MatekF405-UAV` 板级Target；
-- 保存本机GPIO、PWM、光流、测距、iBUS、罗盘和功能裁剪；
-- 与无 SD 实验、罗盘修复和飞行算法实验隔离。
+- RC9从中位进入方向区时只触发一次；
+- 对应方向以1 kHz载波、15%硬件PWM连续运行180 ms；
+- 动作结束后自动停止，持续偏杆不得重复运行；
+- RC9回到`1420～1580`后才重新允许下一次触发；
+- RC失效立即终止动作，并要求恢复后先回中；
+- 目标是约9次覆盖90°机械行程，实际次数等待台架标定。
 
-该分支不是最新 ArduPilot `master`，也不应直接与最新上游固件混刷。
+该分支不是正式Target基线，也不是最新ArduPilot `master`。实机验证通过前不得合并回`feature/matekf405-uav-target`。
 
 ## 2. 已验证的云台链路
 
@@ -48,17 +49,17 @@ M6 / PA8  / TIM1_CH1 ──→ RZ7889 B1
 - 15% 硬件 PWM 能通过机构全行程的最大负载位置；
 - M5/M6 由代码严格互斥，不允许两路同时驱动。
 
-当前保存的速度方案为：
+本分支保存的点动参数为：
 
 ```text
 硬件载波频率：1000 Hz
-开启阶段占空比：15%
-密度开启：10 ms
-密度停止：50 ms
+单步占空比：15%
+单步运行时间：180 ms
+重复触发条件：必须先回到RC9中位死区
 自动回中：关闭
 ```
 
-1 kHz PWM 由 STM32 硬件定时器产生；10/50 ms 只负责低速密度包络，不是用 GPIO 模拟 1 kHz PWM。
+1 kHz PWM仍由STM32硬件定时器产生；180 ms只是单步动作窗口，不是GPIO软件PWM。180 ms由原有15% PWM、10/50 ms密度方案约10秒覆盖全行程推算而来，属于首轮开环标定值，不能保证每步严格10°。
 
 ## 3. 失效安全行为
 
@@ -89,7 +90,7 @@ M6 / PA8  / TIM1_CH1 ──→ RZ7889 B1
 
 | 文件 | 作用 |
 |---|---|
-| `ArduCopter/UserCode.cpp` | RC9、M5/M6、1 kHz硬件PWM、密度调速和失效保护 |
+| `ArduCopter/UserCode.cpp` | RC9、M5/M6、1 kHz硬件PWM、180 ms单步状态机和失效保护 |
 | `ArduCopter/APM_Config.h` | 只对 `MatekF405-UAV` 启用所需UserHook |
 | `libraries/AP_HAL_ChibiOS/hwdef/MatekF405-UAV/hwdef.dat` | 继承MatekF405并覆盖GPIO、传感器后端和功能裁剪 |
 | `libraries/AP_HAL_ChibiOS/hwdef/MatekF405-UAV/hwdef-bl.dat` | 继承标准bootloader布局，保留Board ID 125 |
@@ -165,6 +166,7 @@ git switch -c feature/my-change baseline/matekf405-gimbal-sd-20260730
 | `project/matekf405-gimbal-ap457` | 稳定基线 | 已验证云台及当前MatekF405功能 |
 | `test/matekf405-no-sd-fatfs` | 台架实验 | 关闭SPI SD/FATFS，分析启动延迟 |
 | `feature/matekf405-uav-target` | 已编译、待实机 | 独立 `MatekF405-UAV` 板级Target |
+| `feature/gimbal-rc9-single-step` | 已编译、待台架 | RC9每次离中触发15%/180 ms单步 |
 
 ## 9. 已完成的构建验证
 
@@ -172,7 +174,7 @@ git switch -c feature/my-change baseline/matekf405-gimbal-sd-20260730
 
 | 构建 | 结果 | Flash使用/剩余 |
 |---|---|---|
-| `MatekF405-UAV` ArduCopter | 通过 | 899,652 B / 83,388 B |
+| `MatekF405-UAV` ArduCopter（单步180 ms） | 通过 | 899,707 B / 83,332 B |
 | 标准 `MatekF405` ArduCopter | 通过 | 897,948 B / 85,092 B |
 | `MatekF405-UAV` bootloader | 通过 | 14,440 B / 18,328 B |
 
@@ -184,15 +186,24 @@ git switch -c feature/my-change baseline/matekf405-gimbal-sd-20260730
 - 通用MatekF405仍可独立构建；
 - 构建产物不提交Git，只保留源码、README和构建方法。
 
-## 10. 下一步实机验证
+## 10. 累计测试记录与下一步
 
-1. 导出当前参数并保存已验证固件；
-2. 拆桨刷写`MatekF405-UAV/arducopter.apj`；
-3. 核对板型、Board ID、串口和RC输入；
-4. 核对M5/M6严格互斥和RC9死区停止；
-5. 核对HMC5883 DevID `466433`、方向和重新校准后的偏置；
-6. 核对光流、测距、SD日志和解锁检查；
-7. 全部通过后才进入低风险离地测试。
+### 2026-08-13：单步180 ms首版
+
+- 分支：`feature/gimbal-rc9-single-step`；
+- 参数：1 kHz、15%、180 ms，自动回中关闭；
+- 编译：`MatekF405-UAV`通过，Board ID 125；
+- 当前状态：**待拆桨台架验证**，没有实机通过结论；
+- 待测：上电不动作、一次离中只运行一步、持续偏杆不重复、回中后可重触发、RC失效立即停止、M5/M6严格互斥；
+- 标定：分别记录上到下、下到上覆盖90°所需次数；机械到达端点后禁止继续点动。
+
+台架反馈后只更新本节累计记录，不为每次参数调整新建重复文档。若实测不是9步，应在本功能分支内调整180 ms并形成新提交。
+
+回滚到正式Target基线：
+
+```bash
+git switch feature/matekf405-uav-target
+```
 
 ## 11. 安全与许可
 

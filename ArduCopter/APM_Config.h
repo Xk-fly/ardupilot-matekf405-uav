@@ -43,8 +43,8 @@
 // Put your custom code into the UserCode.cpp with function names matching those listed below and ensure the appropriate #define below is uncommented below
 #if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
 #define USERHOOK_INIT userhook_init();                      // for code to be run once at startup
-#define USERHOOK_FASTLOOP userhook_FastLoop();              // 100Hz density envelope; timer still generates 1kHz PWM
-#define USERHOOK_50HZLOOP userhook_50Hz();                  // for RC9 direction/control updates at 50hz
+#define USERHOOK_FASTLOOP userhook_FastLoop();              // refresh SRV output ownership at 100Hz; carrier remains hardware PWM
+#define USERHOOK_50HZLOOP userhook_50Hz();                  // RC9 single-step state machine at 50Hz
 #endif
 //#define USERHOOK_MEDIUMLOOP userhook_MediumLoop();        // for code to be run at 10hz
 //#define USERHOOK_SLOWLOOP userhook_SlowLoop();            // for code to be run at 3.3hz

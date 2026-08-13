@@ -23,14 +23,11 @@
 #define GIMBAL_RC_MIN_VALID_PWM 800U
 #define GIMBAL_RC_MAX_VALID_PWM 2200U
 
-// Hardware carrier and short-period density modulation. During the ON window
-// only the requested direction receives 15% hardware PWM; during the OFF
-// window both RZ7889 inputs are held at 0%.
+// Single-step control: each RC9 departure from center drives one direction at
+// 15% hardware PWM for a fixed interval, then stops until RC9 returns center.
 #define GIMBAL_HW_PWM_FREQUENCY_HZ 1000U
 #define GIMBAL_MANUAL_DUTY_PERCENT 15U
-#define GIMBAL_DENSITY_ON_MS 10U
-#define GIMBAL_DENSITY_OFF_MS 50U
-#define GIMBAL_DENSITY_PERIOD_MS (GIMBAL_DENSITY_ON_MS + GIMBAL_DENSITY_OFF_MS)
+#define GIMBAL_SINGLE_STEP_TIME_MS 180U
 
 // Auto-home remains implemented but deliberately disabled for this build.
 #define GIMBAL_AUTO_HOME_ENABLED 0
@@ -57,8 +54,10 @@ static uint32_t gimbal_last_command_ms = 0;
 static uint16_t gimbal_pwm_min = 1000U;
 static uint16_t gimbal_pwm_max = 2000U;
 static bool gimbal_hw_pwm_ready = false;
-static GimbalDrive gimbal_density_drive = GimbalDrive::Stop;
-static uint32_t gimbal_density_cycle_start_ms = 0;
+static bool gimbal_single_step_ready = false;
+static bool gimbal_single_step_active = false;
+static GimbalDrive gimbal_single_step_drive = GimbalDrive::Stop;
+static uint32_t gimbal_single_step_start_ms = 0;
 
 static void gimbal_request_drive(const GimbalDrive drive, const uint8_t duty_percent)
 {
@@ -104,29 +103,63 @@ static bool gimbal_read_rc9_pwm(uint16_t &rc_pwm)
     return true;
 }
 
-#if GIMBAL_AUTO_HOME_ENABLED
 static bool gimbal_rc_pwm_in_deadzone(const uint16_t rc_pwm)
 {
     return (rc_pwm >= (GIMBAL_RC_CENTER_PWM - GIMBAL_RC_DEADZONE_PWM)) &&
            (rc_pwm <= (GIMBAL_RC_CENTER_PWM + GIMBAL_RC_DEADZONE_PWM));
 }
-#endif
 
 static void gimbal_update_manual_request_from_rc9()
 {
     uint16_t rc_pwm = GIMBAL_RC_CENTER_PWM;
     if (!gimbal_read_rc9_pwm(rc_pwm)) {
+        // RC loss aborts an active step and requires a new valid center sample
+        // before motion can be triggered again.
+        gimbal_single_step_ready = false;
+        gimbal_single_step_active = false;
+        gimbal_single_step_drive = GimbalDrive::Stop;
         gimbal_request_drive(GimbalDrive::Stop, 0);
         return;
     }
 
-    if (rc_pwm > (GIMBAL_RC_CENTER_PWM + GIMBAL_RC_DEADZONE_PWM)) {
-        gimbal_request_drive(GimbalDrive::M5, GIMBAL_MANUAL_DUTY_PERCENT);
-    } else if (rc_pwm < (GIMBAL_RC_CENTER_PWM - GIMBAL_RC_DEADZONE_PWM)) {
-        gimbal_request_drive(GimbalDrive::M6, GIMBAL_MANUAL_DUTY_PERCENT);
-    } else {
+    const uint32_t now_ms = AP_HAL::millis();
+    const bool in_deadzone = gimbal_rc_pwm_in_deadzone(rc_pwm);
+
+    if (gimbal_single_step_active) {
+        if ((now_ms - gimbal_single_step_start_ms) < GIMBAL_SINGLE_STEP_TIME_MS) {
+            // A quick spring return does not truncate the calibrated step.
+            // Invalid RC input still aborts immediately via the check above.
+            gimbal_request_drive(gimbal_single_step_drive, GIMBAL_MANUAL_DUTY_PERCENT);
+            return;
+        }
+
+        gimbal_single_step_active = false;
+        gimbal_single_step_drive = GimbalDrive::Stop;
+        gimbal_single_step_ready = in_deadzone;
         gimbal_request_drive(GimbalDrive::Stop, 0);
+        return;
     }
+
+    if (in_deadzone) {
+        gimbal_single_step_ready = true;
+        gimbal_request_drive(GimbalDrive::Stop, 0);
+        return;
+    }
+
+    if (!gimbal_single_step_ready) {
+        // Holding RC9 away from center, including changing directly from one
+        // side to the other, must not retrigger another step.
+        gimbal_request_drive(GimbalDrive::Stop, 0);
+        return;
+    }
+
+    gimbal_single_step_ready = false;
+    gimbal_single_step_active = true;
+    gimbal_single_step_start_ms = now_ms;
+    gimbal_single_step_drive =
+        (rc_pwm > (GIMBAL_RC_CENTER_PWM + GIMBAL_RC_DEADZONE_PWM)) ?
+        GimbalDrive::M5 : GimbalDrive::M6;
+    gimbal_request_drive(gimbal_single_step_drive, GIMBAL_MANUAL_DUTY_PERCENT);
 }
 
 static bool gimbal_update_auto_home_request()
@@ -231,28 +264,6 @@ static void gimbal_disable_hw_pwm()
     gimbal_hw_pwm_ready = false;
 }
 
-static bool gimbal_density_output_enabled(const uint32_t now_ms)
-{
-    if ((gimbal_requested_drive == GimbalDrive::Stop) ||
-        (gimbal_requested_duty_percent == 0U)) {
-        gimbal_density_drive = GimbalDrive::Stop;
-        gimbal_density_cycle_start_ms = now_ms;
-        return false;
-    }
-
-    // A new direction always starts a fresh 10 ms ON window. This also resets
-    // the envelope after RC loss/deadzone instead of inheriting an old phase.
-    if (gimbal_density_drive != gimbal_requested_drive) {
-        gimbal_density_drive = gimbal_requested_drive;
-        gimbal_density_cycle_start_ms = now_ms;
-        return true;
-    }
-
-    const uint32_t cycle_ms = (now_ms - gimbal_density_cycle_start_ms) %
-                              GIMBAL_DENSITY_PERIOD_MS;
-    return cycle_ms < GIMBAL_DENSITY_ON_MS;
-}
-
 static void gimbal_apply_hardware_pwm()
 {
     if (!gimbal_hw_pwm_ready) {
@@ -265,7 +276,7 @@ static void gimbal_apply_hardware_pwm()
     const uint32_t now_ms = AP_HAL::millis();
     const bool command_fresh =
         (now_ms - gimbal_last_command_ms) <= GIMBAL_RC_INPUT_TIMEOUT_MS;
-    if (command_fresh && gimbal_density_output_enabled(now_ms)) {
+    if (command_fresh) {
         const uint16_t active_pwm = gimbal_duty_to_pwm(gimbal_requested_duty_percent);
         if ((gimbal_requested_drive == GimbalDrive::M5) &&
             (gimbal_requested_duty_percent > 0U)) {
@@ -274,10 +285,6 @@ static void gimbal_apply_hardware_pwm()
                    (gimbal_requested_duty_percent > 0U)) {
             m6_pwm = active_pwm;
         }
-    } else if (!command_fresh) {
-        // A stale RC command immediately invalidates the old density phase.
-        gimbal_density_drive = GimbalDrive::Stop;
-        gimbal_density_cycle_start_ms = now_ms;
     }
 
     // Re-establish safe scaled fallbacks before applying short PWM overrides.
@@ -355,7 +362,7 @@ void Copter::userhook_init()
 
     gimbal_hw_pwm_ready = true;
     gimbal_apply_hardware_pwm();
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Gimbal HW PWM: 1000Hz 15%%, density 10/50ms");
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Gimbal single-step: 1000Hz 15%% 180ms");
     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Gimbal auto-home: OFF");
 #endif
 }
@@ -365,8 +372,8 @@ void Copter::userhook_init()
 void Copter::userhook_FastLoop()
 {
 #if GIMBAL_RZ7889_RC9_CONTROL_ENABLED
-    // Copter schedules this hook at 100 Hz, allowing a real 10 ms envelope
-    // window. The 1 kHz carrier itself remains generated by hardware timers.
+    // Refresh the SRV ownership timeout at 100 Hz. The 1 kHz carrier remains
+    // generated by hardware timers; this hook does not synthesize PWM edges.
     gimbal_apply_hardware_pwm();
 #endif
 }
