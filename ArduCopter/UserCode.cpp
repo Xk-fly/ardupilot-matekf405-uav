@@ -18,7 +18,7 @@
 #define GIMBAL_RC9_INDEX 8U
 #define GIMBAL_RC_CENTER_PWM 1500U
 #define GIMBAL_RC_DEADZONE_PWM 80U
-#define GIMBAL_RC_INPUT_TIMEOUT_MS 500U
+#define GIMBAL_RC_INPUT_TIMEOUT_MS 50U
 #define GIMBAL_OUTPUT_OVERRIDE_TIMEOUT_MS 100U
 #define GIMBAL_RC_MIN_VALID_PWM 800U
 #define GIMBAL_RC_MAX_VALID_PWM 2200U
@@ -48,14 +48,19 @@ enum class GimbalDrive : uint8_t {
     M6 = 2,
 };
 
+enum class GimbalStepState : uint8_t {
+    WaitCenter = 0,
+    Ready = 1,
+    Running = 2,
+};
+
 static GimbalDrive gimbal_requested_drive = GimbalDrive::Stop;
 static uint8_t gimbal_requested_duty_percent = 0;
 static uint32_t gimbal_last_command_ms = 0;
 static uint16_t gimbal_pwm_min = 1000U;
 static uint16_t gimbal_pwm_max = 2000U;
 static bool gimbal_hw_pwm_ready = false;
-static bool gimbal_single_step_ready = false;
-static bool gimbal_single_step_active = false;
+static GimbalStepState gimbal_single_step_state = GimbalStepState::WaitCenter;
 static GimbalDrive gimbal_single_step_drive = GimbalDrive::Stop;
 static uint32_t gimbal_single_step_start_ms = 0;
 
@@ -64,6 +69,13 @@ static void gimbal_request_drive(const GimbalDrive drive, const uint8_t duty_per
     gimbal_requested_drive = drive;
     gimbal_requested_duty_percent = MIN(duty_percent, 100U);
     gimbal_last_command_ms = AP_HAL::millis();
+}
+
+static void gimbal_abort_single_step()
+{
+    gimbal_single_step_state = GimbalStepState::WaitCenter;
+    gimbal_single_step_drive = GimbalDrive::Stop;
+    gimbal_request_drive(GimbalDrive::Stop, 0);
 }
 
 static uint16_t gimbal_duty_to_pwm(const uint8_t duty_percent)
@@ -113,49 +125,34 @@ static void gimbal_update_manual_request_from_rc9()
 {
     uint16_t rc_pwm = GIMBAL_RC_CENTER_PWM;
     if (!gimbal_read_rc9_pwm(rc_pwm)) {
-        // RC loss aborts an active step and requires a new valid center sample
-        // before motion can be triggered again.
-        gimbal_single_step_ready = false;
-        gimbal_single_step_active = false;
-        gimbal_single_step_drive = GimbalDrive::Stop;
-        gimbal_request_drive(GimbalDrive::Stop, 0);
+        gimbal_abort_single_step();
         return;
     }
 
-    const uint32_t now_ms = AP_HAL::millis();
     const bool in_deadzone = gimbal_rc_pwm_in_deadzone(rc_pwm);
 
-    if (gimbal_single_step_active) {
-        if ((now_ms - gimbal_single_step_start_ms) < GIMBAL_SINGLE_STEP_TIME_MS) {
-            // A quick spring return does not truncate the calibrated step.
-            // Invalid RC input still aborts immediately via the check above.
-            gimbal_request_drive(gimbal_single_step_drive, GIMBAL_MANUAL_DUTY_PERCENT);
-            return;
-        }
+    if (gimbal_single_step_state == GimbalStepState::Running) {
+        // Direction changes, including a quick spring return, are ignored
+        // while the calibrated step is active. The output path owns its cutoff.
+        gimbal_request_drive(gimbal_single_step_drive, GIMBAL_MANUAL_DUTY_PERCENT);
+        return;
+    }
 
-        gimbal_single_step_active = false;
-        gimbal_single_step_drive = GimbalDrive::Stop;
-        gimbal_single_step_ready = in_deadzone;
+    if (gimbal_single_step_state == GimbalStepState::WaitCenter) {
         gimbal_request_drive(GimbalDrive::Stop, 0);
+        if (in_deadzone) {
+            gimbal_single_step_state = GimbalStepState::Ready;
+        }
         return;
     }
 
     if (in_deadzone) {
-        gimbal_single_step_ready = true;
         gimbal_request_drive(GimbalDrive::Stop, 0);
         return;
     }
 
-    if (!gimbal_single_step_ready) {
-        // Holding RC9 away from center, including changing directly from one
-        // side to the other, must not retrigger another step.
-        gimbal_request_drive(GimbalDrive::Stop, 0);
-        return;
-    }
-
-    gimbal_single_step_ready = false;
-    gimbal_single_step_active = true;
-    gimbal_single_step_start_ms = now_ms;
+    gimbal_single_step_state = GimbalStepState::Running;
+    gimbal_single_step_start_ms = AP_HAL::millis();
     gimbal_single_step_drive =
         (rc_pwm > (GIMBAL_RC_CENTER_PWM + GIMBAL_RC_DEADZONE_PWM)) ?
         GimbalDrive::M5 : GimbalDrive::M6;
@@ -270,10 +267,23 @@ static void gimbal_apply_hardware_pwm()
         return;
     }
 
+    const uint32_t now_ms = AP_HAL::millis();
+    if (gimbal_single_step_state == GimbalStepState::Running) {
+        uint16_t rc_pwm = GIMBAL_RC_CENTER_PWM;
+        if (!gimbal_read_rc9_pwm(rc_pwm)) {
+            // Run the safety check in the fast output path: a receiver-
+            // reported failsafe or 50 ms silent-input timeout stops promptly.
+            gimbal_abort_single_step();
+        } else if ((now_ms - gimbal_single_step_start_ms) >= GIMBAL_SINGLE_STEP_TIME_MS) {
+            // Never refresh an active output beyond the calibrated deadline.
+            // Input samples seen while Running do not re-arm the next step.
+            gimbal_abort_single_step();
+        }
+    }
+
     uint16_t m5_pwm = gimbal_pwm_min;
     uint16_t m6_pwm = gimbal_pwm_min;
 
-    const uint32_t now_ms = AP_HAL::millis();
     const bool command_fresh =
         (now_ms - gimbal_last_command_ms) <= GIMBAL_RC_INPUT_TIMEOUT_MS;
     if (command_fresh) {
@@ -372,7 +382,7 @@ void Copter::userhook_init()
 void Copter::userhook_FastLoop()
 {
 #if GIMBAL_RZ7889_RC9_CONTROL_ENABLED
-    // Refresh the SRV ownership timeout at 100 Hz. The 1 kHz carrier remains
+    // Refresh the SRV ownership timeout in Copter's fast loop. The 1 kHz carrier remains
     // generated by hardware timers; this hook does not synthesize PWM edges.
     gimbal_apply_hardware_pwm();
 #endif
