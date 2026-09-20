@@ -1,0 +1,64 @@
+name: build MatekF405-UAV
+
+on:
+  push:
+    branches:
+      - feature/baro-stability-ap457
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-matekf405-uav-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container: ardupilot/ardupilot-dev-chibios:v0.1.3
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure ccache
+        run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          mkdir -p ~/.ccache
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          echo "/usr/lib/ccache" >> "$GITHUB_PATH"
+          echo "/opt/gcc-arm-none-eabi-10/bin" >> "$GITHUB_PATH"
+
+      - name: Configure MatekF405-UAV
+        run: |
+          ./waf configure --board MatekF405-UAV
+
+      - name: Build ArduCopter
+        run: |
+          ./waf copter -j2
+
+      - name: Record build metadata
+        run: |
+          mkdir -p build-artifact
+          cp build/MatekF405-UAV/bin/arducopter.apj build-artifact/
+          cp build/MatekF405-UAV/bin/arducopter.bin build-artifact/
+          {
+            echo "branch=${GITHUB_REF_NAME}"
+            echo "commit=${GITHUB_SHA}"
+            echo "board=MatekF405-UAV"
+            echo "vehicle=ArduCopter"
+            echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            sha256sum build-artifact/arducopter.apj
+            sha256sum build-artifact/arducopter.bin
+          } > build-artifact/BUILD_INFO.txt
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MatekF405-UAV-${{ github.sha }}
+          path: build-artifact/
+          if-no-files-found: error
+          retention-days: 30
