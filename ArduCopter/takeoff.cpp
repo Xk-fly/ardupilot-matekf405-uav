@@ -14,6 +14,38 @@ bool Mode::do_user_takeoff_start(float takeoff_alt_cm)
     return true;
 }
 
+// Start a user takeoff by a relative climb amount from the current Z target.
+// This intentionally mirrors the normal user-takeoff safety gates but avoids
+// the absolute-altitude semantics of MAV_CMD_NAV_TAKEOFF.
+bool Mode::do_user_takeoff_relative(float climb_alt_cm, bool must_navigate)
+{
+    if (!copter.motors->armed()) {
+        return false;
+    }
+    if (!copter.ap.land_complete) {
+        return false;
+    }
+    if (!has_user_takeoff(must_navigate)) {
+        return false;
+    }
+    if (climb_alt_cm <= 0.0f) {
+        return false;
+    }
+
+    // Vehicles using motor interlock must have the interlock enabled before
+    // the one-key takeoff is allowed to spool the motors.
+    if (!motors->get_interlock() && copter.ap.using_interlock) {
+        return false;
+    }
+
+    if (!do_user_takeoff_start(climb_alt_cm)) {
+        return false;
+    }
+
+    copter.set_auto_armed(true);
+    return true;
+}
+
 // initiate user takeoff - called when MAVLink TAKEOFF command is received
 bool Mode::do_user_takeoff(float takeoff_alt_cm, bool must_navigate)
 {
