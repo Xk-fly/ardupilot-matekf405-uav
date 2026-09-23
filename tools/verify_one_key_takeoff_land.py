@@ -26,7 +26,7 @@ required_user = [
     "onekey_takeoff_watchdog_active = true;",
     "Mode::takeoff_stop();",
     "OneKey TO abort: no liftoff in 3s, disarmed",
-    "arming.disarm(AP_Arming::Method::AUXSWITCH)",
+    "arming.disarm(AP_Arming::Method::AUXSWITCH, false)",
     "set_mode(Mode::Number::LAND, ModeReason::RC_COMMAND)",
 ]
 for item in required_user:
