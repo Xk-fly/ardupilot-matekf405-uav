@@ -8,11 +8,21 @@
 // LOW edge: if armed, enter native LAND.
 // MIDDLE only re-arms the edge detector; returning to center never changes mode.
 #define ONEKEY_RC_INPUT_TIMEOUT_MS 500U
+#define ONEKEY_SPOOL_READY_TIMEOUT_MS 5000U
 #define ONEKEY_TAKEOFF_LIFTOFF_TIMEOUT_MS 3000U
+#define ONEKEY_LIFTOFF_CONFIRM_CM 12.0f
+#define ONEKEY_LIFTOFF_ABORT_MAX_CM 8.0f
+#define ONEKEY_LIFTOFF_CONFIRM_HOLD_MS 150U
 #define ONEKEY_MIN_TAKEOFF_ALT_CM 10.0f
 #define ONEKEY_MAX_TAKEOFF_ALT_CM 1000.0f
 
 namespace {
+
+enum class OneKeyTakeoffState : uint8_t {
+    IDLE = 0,
+    WAIT_SPOOL,
+    WAIT_LIFTOFF
+};
 
 static bool onekey_rc_input_fresh()
 {
@@ -22,12 +32,20 @@ static bool onekey_rc_input_fresh()
     return (AP_HAL::millis() - rc().last_input_ms()) <= ONEKEY_RC_INPUT_TIMEOUT_MS;
 }
 
-// Set only after a one-key takeoff has successfully armed and started.
-// The 50 Hz hook clears it as soon as ArduPilot's land detector reports
-// liftoff. If the vehicle is still landed after 3 seconds, takeoff is
-// cancelled and the vehicle is automatically disarmed.
-static bool onekey_takeoff_watchdog_active = false;
-static uint32_t onekey_takeoff_watchdog_start_ms = 0U;
+static OneKeyTakeoffState onekey_takeoff_state = OneKeyTakeoffState::IDLE;
+static uint32_t onekey_takeoff_phase_start_ms = 0U;
+static uint32_t onekey_liftoff_above_since_ms = 0U;
+static float onekey_pending_takeoff_alt_cm = 0.0f;
+static float onekey_takeoff_start_inertial_z_cm = 0.0f;
+
+static void onekey_reset_takeoff_state()
+{
+    onekey_takeoff_state = OneKeyTakeoffState::IDLE;
+    onekey_takeoff_phase_start_ms = 0U;
+    onekey_liftoff_above_since_ms = 0U;
+    onekey_pending_takeoff_alt_cm = 0.0f;
+    onekey_takeoff_start_inertial_z_cm = 0.0f;
+}
 
 } // namespace
 
@@ -404,30 +422,109 @@ void Copter::userhook_FastLoop()
 #ifdef USERHOOK_50HZLOOP
 void Copter::userhook_50Hz()
 {
-    if (onekey_takeoff_watchdog_active) {
-        const uint32_t watchdog_now_ms = AP_HAL::millis();
+    const uint32_t onekey_now_ms = AP_HAL::millis();
 
-        // Normal successful path: as soon as ArduPilot itself declares the
-        // vehicle no longer landed, the 3-second watchdog is finished.
+    if (onekey_takeoff_state == OneKeyTakeoffState::WAIT_SPOOL) {
+        // The mode or arming state changed before takeoff began: cancel the
+        // one-key sequence. If still safely landed, leave no armed vehicle
+        // behind after an interrupted automatic sequence.
         if (!motors->armed()) {
-            onekey_takeoff_watchdog_active = false;
-        } else if (!ap.land_complete) {
-            onekey_takeoff_watchdog_active = false;
-            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey TO liftoff confirmed");
-        } else if ((watchdog_now_ms - onekey_takeoff_watchdog_start_ms) >=
-                   ONEKEY_TAKEOFF_LIFTOFF_TIMEOUT_MS) {
-            // Still landed after 3 s: stop the user-takeoff state machine
-            // before disarming so no pending takeoff can survive the abort.
-            Mode::takeoff_stop();
-            onekey_takeoff_watchdog_active = false;
-
-            const bool disarmed = arming.disarm(AP_Arming::Method::AUXSWITCH, false);
-            if (disarmed) {
-                GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
-                              "OneKey TO abort: no liftoff in 3s, disarmed");
+            onekey_reset_takeoff_state();
+        } else if (flightmode != &mode_loiter) {
+            if (ap.land_complete) {
+                (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
+            }
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO cancelled: mode changed");
+        } else if ((onekey_now_ms - onekey_takeoff_phase_start_ms) >=
+                   ONEKEY_SPOOL_READY_TIMEOUT_MS) {
+            if (ap.land_complete) {
+                (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
+            }
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "OneKey TO abort: motor spool timeout");
+        } else if (!ap.in_arming_delay &&
+                   motors->get_interlock() &&
+                   (motors->get_spool_state() == AP_Motors::SpoolState::THROTTLE_UNLIMITED)) {
+            // This is deliberately delayed until after the normal ArduPilot
+            // arming delay and motor spool-up. Starting Takeoff earlier skips
+            // the landed/pre-takeoff branch that requests motor spool-up.
+            if (!ap.land_complete) {
+                onekey_reset_takeoff_state();
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO cancelled: no longer landed");
+            } else if (!mode_loiter.do_user_takeoff_relative(onekey_pending_takeoff_alt_cm, true)) {
+                (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
+                onekey_reset_takeoff_state();
+                GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "OneKey TO failed: takeoff start");
             } else {
-                GCS_SEND_TEXT(MAV_SEVERITY_ERROR,
-                              "OneKey TO abort: disarm failed");
+                onekey_takeoff_state = OneKeyTakeoffState::WAIT_LIFTOFF;
+                onekey_takeoff_phase_start_ms = onekey_now_ms;
+                onekey_liftoff_above_since_ms = 0U;
+                onekey_takeoff_start_inertial_z_cm = inertial_nav.get_position_z_up_cm();
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey spool ready; takeoff %.0fcm",
+                              double(onekey_pending_takeoff_alt_cm));
+            }
+        }
+    } else if (onekey_takeoff_state == OneKeyTakeoffState::WAIT_LIFTOFF) {
+        if (!motors->armed()) {
+            onekey_reset_takeoff_state();
+        } else if (flightmode != &mode_loiter) {
+            // A deliberate pilot mode change after takeoff has started owns
+            // the aircraft from this point; never let the watchdog disarm it.
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey TO monitor cancelled: mode changed");
+        } else {
+            int32_t range_alt_cm = 0;
+            const bool range_valid = get_rangefinder_height_interpolated_cm(range_alt_cm);
+            const float inertial_delta_cm =
+                inertial_nav.get_position_z_up_cm() - onekey_takeoff_start_inertial_z_cm;
+
+            // Prefer a physical rangefinder confirmation. The short hold time
+            // rejects a single transient sample while remaining responsive.
+            const bool range_above_liftoff =
+                range_valid && (range_alt_cm >= int32_t(ONEKEY_LIFTOFF_CONFIRM_CM));
+            if (range_above_liftoff) {
+                if (onekey_liftoff_above_since_ms == 0U) {
+                    onekey_liftoff_above_since_ms = onekey_now_ms;
+                } else if ((onekey_now_ms - onekey_liftoff_above_since_ms) >=
+                           ONEKEY_LIFTOFF_CONFIRM_HOLD_MS) {
+                    onekey_reset_takeoff_state();
+                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey TO liftoff confirmed");
+                }
+            } else {
+                onekey_liftoff_above_since_ms = 0U;
+            }
+
+            if ((onekey_takeoff_state == OneKeyTakeoffState::WAIT_LIFTOFF) &&
+                ((onekey_now_ms - onekey_takeoff_phase_start_ms) >=
+                 ONEKEY_TAKEOFF_LIFTOFF_TIMEOUT_MS)) {
+                // Only auto-disarm when sensors positively say the vehicle is
+                // still on/very near the ground. If range is unavailable or
+                // the vehicle may already be airborne, fail safe by keeping
+                // it armed and merely ending this watchdog.
+                const bool definitely_not_lifted =
+                    range_valid &&
+                    (range_alt_cm <= int32_t(ONEKEY_LIFTOFF_ABORT_MAX_CM)) &&
+                    (inertial_delta_cm < 15.0f);
+
+                if (definitely_not_lifted) {
+                    Mode::takeoff_stop();
+                    set_auto_armed(false);
+                    const bool disarmed =
+                        arming.disarm(AP_Arming::Method::AUXSWITCH, false);
+                    onekey_reset_takeoff_state();
+                    if (disarmed) {
+                        GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                                      "OneKey TO abort: no physical liftoff in 3s");
+                    } else {
+                        GCS_SEND_TEXT(MAV_SEVERITY_ERROR,
+                                      "OneKey TO abort: disarm failed");
+                    }
+                } else {
+                    onekey_reset_takeoff_state();
+                    GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                                  "OneKey TO watchdog inconclusive; no auto-disarm");
+                }
             }
         }
     }
@@ -543,23 +640,21 @@ void Copter::userhook_auxSwitch1(const RC_Channel::AuxSwitchPos ch_flag)
             return;
         }
 
-        // Start the same user-takeoff state machine used by Loiter/AltHold,
-        // but with PILOT_TKOFF_ALT interpreted explicitly as a relative climb.
-        if (!mode_loiter.do_user_takeoff_relative(takeoff_alt_cm, true)) {
-            (void)arming.disarm(AP_Arming::Method::AUXSWITCH);
-            GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "OneKey TO failed: takeoff start");
-            return;
-        }
-
-        onekey_takeoff_watchdog_start_ms = AP_HAL::millis();
-        onekey_takeoff_watchdog_active = true;
-        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey takeoff started: %.0fcm", double(takeoff_alt_cm));
+        // Do NOT start Takeoff in this aux-switch callback. The motors need
+        // ArduPilot's normal arming delay and landed/pre-takeoff loop to reach
+        // THROTTLE_UNLIMITED first. userhook_50Hz() starts Takeoff only after
+        // the motor spool state is genuinely ready.
+        onekey_pending_takeoff_alt_cm = takeoff_alt_cm;
+        onekey_takeoff_phase_start_ms = AP_HAL::millis();
+        onekey_takeoff_state = OneKeyTakeoffState::WAIT_SPOOL;
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey armed; waiting motor spool");
         return;
     }
 
     if (ch_flag == RC_Channel::AuxSwitchPos::LOW) {
-        onekey_takeoff_watchdog_active = false;
+        onekey_reset_takeoff_state();
         Mode::takeoff_stop();
+        set_auto_armed(false);
 
         // Down command is the native LAND mode. Returning the self-centering
         // switch to MIDDLE does not cancel LAND.
