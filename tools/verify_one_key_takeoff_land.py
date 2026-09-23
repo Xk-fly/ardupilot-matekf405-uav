@@ -9,9 +9,13 @@ takeoff = (root / "ArduCopter/takeoff.cpp").read_text(encoding="utf-8")
 
 required_user = [
     "ONEKEY_RC_INPUT_TIMEOUT_MS 500U",
+    "ONEKEY_SPOOL_READY_TIMEOUT_MS 5000U",
     "ONEKEY_TAKEOFF_LIFTOFF_TIMEOUT_MS 3000U",
-    "static bool onekey_takeoff_watchdog_active = false;",
-    "static uint32_t onekey_takeoff_watchdog_start_ms = 0U;",
+    "ONEKEY_LIFTOFF_CONFIRM_CM 12.0f",
+    "ONEKEY_LIFTOFF_ABORT_MAX_CM 8.0f",
+    "enum class OneKeyTakeoffState",
+    "WAIT_SPOOL",
+    "WAIT_LIFTOFF",
     "static bool center_seen = false;",
     "if (ch_flag == RC_Channel::AuxSwitchPos::MIDDLE)",
     "if (!center_seen)",
@@ -21,11 +25,17 @@ required_user = [
     "if (!position_ok())",
     "set_mode(Mode::Number::LOITER, ModeReason::RC_COMMAND)",
     "arming.arm(AP_Arming::Method::AUXSWITCH, true)",
-    "mode_loiter.do_user_takeoff_relative(takeoff_alt_cm, true)",
-    "onekey_takeoff_watchdog_start_ms = AP_HAL::millis();",
-    "onekey_takeoff_watchdog_active = true;",
+    "OneKey armed; waiting motor spool",
+    "!ap.in_arming_delay",
+    "motors->get_interlock()",
+    "AP_Motors::SpoolState::THROTTLE_UNLIMITED",
+    "position lost before takeoff",
+    "mode_loiter.do_user_takeoff_relative(onekey_pending_takeoff_alt_cm, true)",
+    "get_rangefinder_height_interpolated_cm(range_alt_cm)",
+    "OneKey TO liftoff confirmed",
     "Mode::takeoff_stop();",
-    "OneKey TO abort: no liftoff in 3s, disarmed",
+    "set_auto_armed(false);",
+    "OneKey TO abort: no physical liftoff in 3s",
     "arming.disarm(AP_Arming::Method::AUXSWITCH, false)",
     "set_mode(Mode::Number::LAND, ModeReason::RC_COMMAND)",
 ]
@@ -56,9 +66,8 @@ for item in required_takeoff:
     if item not in takeoff:
         raise SystemExit(f"relative takeoff safety gate missing: {item}")
 
-
-# V2 test-build intentionally removes the four-stick precondition while keeping
-# normal ArduPilot arming checks. The obsolete gate must not remain in source.
+# Four-stick custom gating stays intentionally removed; normal ArduPilot arming
+# checks remain authoritative.
 for forbidden in [
     "ONEKEY_STICK_CENTER_TOLERANCE_PWM",
     "onekey_channel_centered(",
@@ -67,18 +76,40 @@ for forbidden in [
     if forbidden in user:
         raise SystemExit(f"obsolete one-key stick gate still present: {forbidden}")
 
-# The watchdog must run from the existing 50 Hz user hook so the 3 s timeout
-# is independent of further aux-switch movements.
 hook_i = user.index("void Copter::userhook_50Hz()")
-abort_i = user.index("OneKey TO abort: no liftoff in 3s, disarmed")
-if abort_i < hook_i:
-    raise SystemExit("one-key liftoff watchdog is not serviced from userhook_50Hz")
+aux_i = user.index("void Copter::userhook_auxSwitch1")
+wait_spool_i = user.index("OneKeyTakeoffState::WAIT_SPOOL", hook_i)
+spool_ready_i = user.index("AP_Motors::SpoolState::THROTTLE_UNLIMITED", hook_i)
+takeoff_i = user.index(
+    "mode_loiter.do_user_takeoff_relative(onekey_pending_takeoff_alt_cm, true)",
+    hook_i,
+)
+if not (hook_i < wait_spool_i < spool_ready_i < takeoff_i < aux_i):
+    raise SystemExit("takeoff must start asynchronously from userhook_50Hz after spool ready")
 
-# The takeoff callback must mode-switch before arming, and arm before starting takeoff.
-loiter_i = user.index("set_mode(Mode::Number::LOITER, ModeReason::RC_COMMAND)")
-arm_i = user.index("arming.arm(AP_Arming::Method::AUXSWITCH, true)")
-takeoff_i = user.index("mode_loiter.do_user_takeoff_relative(takeoff_alt_cm, true)")
-if not (loiter_i < arm_i < takeoff_i):
-    raise SystemExit("one-key takeoff sequence is not LOITER -> ARM -> TAKEOFF")
+# The AUX callback must only switch LOITER, arm, and queue WAIT_SPOOL. It must
+# not directly start Takeoff in the same callback.
+aux_text = user[aux_i:]
+if "mode_loiter.do_user_takeoff_relative(" in aux_text:
+    raise SystemExit("aux callback directly starts Takeoff; spool sequencing regression")
+loiter_i = aux_text.index("set_mode(Mode::Number::LOITER, ModeReason::RC_COMMAND)")
+arm_i = aux_text.index("arming.arm(AP_Arming::Method::AUXSWITCH, true)")
+queue_i = aux_text.index("onekey_takeoff_state = OneKeyTakeoffState::WAIT_SPOOL")
+if not (loiter_i < arm_i < queue_i):
+    raise SystemExit("aux sequence must be LOITER -> ARM -> WAIT_SPOOL")
+
+# Never use land_complete alone as physical liftoff confirmation. The watchdog
+# must use the downward rangefinder before any automatic no-liftoff disarm.
+watchdog = user[hook_i:aux_i]
+if "else if (!ap.land_complete)" in watchdog and "liftoff confirmed" in watchdog:
+    # land_complete is allowed for spool preconditions, but not as the success signal
+    success_region = watchdog[watchdog.index("WAIT_LIFTOFF"):]
+    if "if (!ap.land_complete)" in success_region.split("OneKey TO liftoff confirmed", 1)[0]:
+        raise SystemExit("land_complete is still used as liftoff confirmation")
+range_i = watchdog.index("get_rangefinder_height_interpolated_cm(range_alt_cm)")
+confirm_i = watchdog.index("OneKey TO liftoff confirmed")
+abort_i = watchdog.index("OneKey TO abort: no physical liftoff in 3s")
+if not (range_i < confirm_i < abort_i):
+    raise SystemExit("physical liftoff watchdog ordering is invalid")
 
 print("ONE_KEY_TAKEOFF_LAND_STATIC_CHECK_PASS")
