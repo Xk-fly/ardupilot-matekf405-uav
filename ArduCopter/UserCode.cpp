@@ -7,23 +7,12 @@
 // PILOT_TKOFF_ALT takeoff -> remain in LOITER.
 // LOW edge: if armed, enter native LAND.
 // MIDDLE only re-arms the edge detector; returning to center never changes mode.
-#define ONEKEY_STICK_CENTER_TOLERANCE_PWM 80
 #define ONEKEY_RC_INPUT_TIMEOUT_MS 500U
+#define ONEKEY_TAKEOFF_LIFTOFF_TIMEOUT_MS 3000U
 #define ONEKEY_MIN_TAKEOFF_ALT_CM 10.0f
 #define ONEKEY_MAX_TAKEOFF_ALT_CM 1000.0f
 
 namespace {
-
-static bool onekey_channel_centered(const RC_Channel *channel)
-{
-    if (channel == nullptr) {
-        return false;
-    }
-
-    const int16_t delta = channel->get_radio_in() - channel->get_radio_trim();
-    return (delta >= -ONEKEY_STICK_CENTER_TOLERANCE_PWM) &&
-           (delta <= ONEKEY_STICK_CENTER_TOLERANCE_PWM);
-}
 
 static bool onekey_rc_input_fresh()
 {
@@ -32,6 +21,13 @@ static bool onekey_rc_input_fresh()
     }
     return (AP_HAL::millis() - rc().last_input_ms()) <= ONEKEY_RC_INPUT_TIMEOUT_MS;
 }
+
+// Set only after a one-key takeoff has successfully armed and started.
+// The 50 Hz hook clears it as soon as ArduPilot's land detector reports
+// liftoff. If the vehicle is still landed after 3 seconds, takeoff is
+// cancelled and the vehicle is automatically disarmed.
+static bool onekey_takeoff_watchdog_active = false;
+static uint32_t onekey_takeoff_watchdog_start_ms = 0U;
 
 } // namespace
 
@@ -408,6 +404,34 @@ void Copter::userhook_FastLoop()
 #ifdef USERHOOK_50HZLOOP
 void Copter::userhook_50Hz()
 {
+    if (onekey_takeoff_watchdog_active) {
+        const uint32_t watchdog_now_ms = AP_HAL::millis();
+
+        // Normal successful path: as soon as ArduPilot itself declares the
+        // vehicle no longer landed, the 3-second watchdog is finished.
+        if (!motors->armed()) {
+            onekey_takeoff_watchdog_active = false;
+        } else if (!ap.land_complete) {
+            onekey_takeoff_watchdog_active = false;
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey TO liftoff confirmed");
+        } else if ((watchdog_now_ms - onekey_takeoff_watchdog_start_ms) >=
+                   ONEKEY_TAKEOFF_LIFTOFF_TIMEOUT_MS) {
+            // Still landed after 3 s: stop the user-takeoff state machine
+            // before disarming so no pending takeoff can survive the abort.
+            Mode::takeoff_stop();
+            onekey_takeoff_watchdog_active = false;
+
+            const bool disarmed = arming.disarm(AP_Arming::Method::AUXSWITCH);
+            if (disarmed) {
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                              "OneKey TO abort: no liftoff in 3s, disarmed");
+            } else {
+                GCS_SEND_TEXT(MAV_SEVERITY_ERROR,
+                              "OneKey TO abort: disarm failed");
+            }
+        }
+    }
+
     static uint32_t init_time_ms = AP_HAL::millis();
     static uint32_t last_toggle_time_ms = 0;
     static bool is_blinking_stage = false;
@@ -491,17 +515,6 @@ void Copter::userhook_auxSwitch1(const RC_Channel::AuxSwitchPos ch_flag)
             return;
         }
 
-        // All four spring-centered primary controls must be close to trim.
-        // This specifically prevents a stale/held yaw command from being
-        // carried into automatic takeoff.
-        if (!onekey_channel_centered(channel_roll) ||
-            !onekey_channel_centered(channel_pitch) ||
-            !onekey_channel_centered(channel_throttle) ||
-            !onekey_channel_centered(channel_yaw)) {
-            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: sticks not centered");
-            return;
-        }
-
         // LOITER must already have a valid absolute or relative position
         // estimate. Never bypass ArduPilot's position checks.
         if (!position_ok()) {
@@ -538,11 +551,16 @@ void Copter::userhook_auxSwitch1(const RC_Channel::AuxSwitchPos ch_flag)
             return;
         }
 
+        onekey_takeoff_watchdog_start_ms = AP_HAL::millis();
+        onekey_takeoff_watchdog_active = true;
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey takeoff started: %.0fcm", double(takeoff_alt_cm));
         return;
     }
 
     if (ch_flag == RC_Channel::AuxSwitchPos::LOW) {
+        onekey_takeoff_watchdog_active = false;
+        Mode::takeoff_stop();
+
         // Down command is the native LAND mode. Returning the self-centering
         // switch to MIDDLE does not cancel LAND.
         if (!motors->armed()) {
