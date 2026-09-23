@@ -2,6 +2,39 @@
 
 #define MY_CUSTOM_LED_PIN 59
 
+// One-key takeoff / landing on USER_FUNC1 (intended for the self-centering RC7).
+// HIGH edge: disarmed+landed -> LOITER -> normal arming checks -> relative
+// PILOT_TKOFF_ALT takeoff -> remain in LOITER.
+// LOW edge: if armed, enter native LAND.
+// MIDDLE only re-arms the edge detector; returning to center never changes mode.
+#define ONEKEY_STICK_CENTER_TOLERANCE_PWM 80
+#define ONEKEY_RC_INPUT_TIMEOUT_MS 500U
+#define ONEKEY_MIN_TAKEOFF_ALT_CM 10.0f
+#define ONEKEY_MAX_TAKEOFF_ALT_CM 1000.0f
+
+namespace {
+
+static bool onekey_channel_centered(const RC_Channel *channel)
+{
+    if (channel == nullptr) {
+        return false;
+    }
+
+    const int16_t delta = channel->get_radio_in() - channel->get_radio_trim();
+    return (delta >= -ONEKEY_STICK_CENTER_TOLERANCE_PWM) &&
+           (delta <= ONEKEY_STICK_CENTER_TOLERANCE_PWM);
+}
+
+static bool onekey_rc_input_fresh()
+{
+    if (!rc().has_valid_input()) {
+        return false;
+    }
+    return (AP_HAL::millis() - rc().last_input_ms()) <= ONEKEY_RC_INPUT_TIMEOUT_MS;
+}
+
+} // namespace
+
 // MatekF405 + RZ7889 RC9 hardware-PWM gimbal control.
 // Hardware path:
 //   M5 / PA15 / TIM2_CH1 / PWM5 -> RZ7889 A1
@@ -422,6 +455,113 @@ void Copter::userhook_SuperSlowLoop()
 #ifdef USERHOOK_AUXSWITCH
 void Copter::userhook_auxSwitch1(const RC_Channel::AuxSwitchPos ch_flag)
 {
+    // Require the self-centering control to be observed at MIDDLE after boot
+    // and again after every command. This prevents powering the vehicle with
+    // the control held HIGH/LOW from triggering an unintended action.
+    static bool center_seen = false;
+
+    if (ch_flag == RC_Channel::AuxSwitchPos::MIDDLE) {
+        center_seen = true;
+        return;
+    }
+
+    if (!center_seen) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey: return switch to center first");
+        return;
+    }
+
+    // Consume the center qualification immediately. Another command cannot be
+    // accepted until the spring-loaded control returns through MIDDLE.
+    center_seen = false;
+
+    if (ch_flag == RC_Channel::AuxSwitchPos::HIGH) {
+        if (!onekey_rc_input_fresh()) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: RC invalid");
+            return;
+        }
+
+        // One-key takeoff is intentionally valid only from a disarmed, landed
+        // vehicle. An airborne HIGH command can never restart Takeoff.
+        if (motors->armed() || arming.is_armed()) {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey TO ignored: vehicle armed");
+            return;
+        }
+        if (!ap.land_complete) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: not landed");
+            return;
+        }
+
+        // All four spring-centered primary controls must be close to trim.
+        // This specifically prevents a stale/held yaw command from being
+        // carried into automatic takeoff.
+        if (!onekey_channel_centered(channel_roll) ||
+            !onekey_channel_centered(channel_pitch) ||
+            !onekey_channel_centered(channel_throttle) ||
+            !onekey_channel_centered(channel_yaw)) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: sticks not centered");
+            return;
+        }
+
+        // LOITER must already have a valid absolute or relative position
+        // estimate. Never bypass ArduPilot's position checks.
+        if (!position_ok()) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: no position");
+            return;
+        }
+
+        const float takeoff_alt_cm =
+            constrain_float(float(g.pilot_takeoff_alt.get()),
+                            ONEKEY_MIN_TAKEOFF_ALT_CM,
+                            ONEKEY_MAX_TAKEOFF_ALT_CM);
+        if (g.pilot_takeoff_alt.get() < int16_t(ONEKEY_MIN_TAKEOFF_ALT_CM)) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: takeoff alt too low");
+            return;
+        }
+
+        // Mode first, then arm. If LOITER cannot initialise, do not arm.
+        if (!set_mode(Mode::Number::LOITER, ModeReason::RC_COMMAND)) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: Loiter unavailable");
+            return;
+        }
+
+        // Keep all normal ArduPilot arming checks enabled.
+        if (!arming.arm(AP_Arming::Method::AUXSWITCH, true)) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: arming failed");
+            return;
+        }
+
+        // Start the same user-takeoff state machine used by Loiter/AltHold,
+        // but with PILOT_TKOFF_ALT interpreted explicitly as a relative climb.
+        if (!mode_loiter.do_user_takeoff_relative(takeoff_alt_cm, true)) {
+            (void)arming.disarm(AP_Arming::Method::AUXSWITCH);
+            GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "OneKey TO failed: takeoff start");
+            return;
+        }
+
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey takeoff started: %.0fcm", double(takeoff_alt_cm));
+        return;
+    }
+
+    if (ch_flag == RC_Channel::AuxSwitchPos::LOW) {
+        // Down command is the native LAND mode. Returning the self-centering
+        // switch to MIDDLE does not cancel LAND.
+        if (!motors->armed()) {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey LAND ignored: disarmed");
+            return;
+        }
+
+        if (flightmode == &mode_land) {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey LAND: already active");
+            return;
+        }
+
+        if (!set_mode(Mode::Number::LAND, ModeReason::RC_COMMAND)) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey LAND failed");
+            return;
+        }
+
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey LAND started");
+    }
 }
 
 void Copter::userhook_auxSwitch2(const RC_Channel::AuxSwitchPos ch_flag)
