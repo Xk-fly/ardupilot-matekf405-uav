@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/baro-stability-ap457
+      - feature/one-key-takeoff-land
   workflow_dispatch:
 
 permissions:
@@ -31,6 +32,11 @@ jobs:
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "/opt/gcc-arm-none-eabi-10/bin" >> "$GITHUB_PATH"
+
+      - name: Verify one-key takeoff/land source contract
+        if: github.ref_name == 'feature/one-key-takeoff-land'
+        run: |
+          python3 tools/verify_one_key_takeoff_land.py
 
       - name: Configure MatekF405-UAV
         run: |
