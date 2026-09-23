@@ -31,8 +31,12 @@ for item in required_user:
     if item not in user:
         raise SystemExit(f"missing one-key safety contract: {item}")
 
-if "#define USERHOOK_AUXSWITCH ENABLED" not in config:
-    raise SystemExit("USERHOOK_AUXSWITCH is not enabled")
+active_aux_define = any(
+    line.strip().startswith("#define USERHOOK_AUXSWITCH ENABLED")
+    for line in config.splitlines()
+)
+if not active_aux_define:
+    raise SystemExit("USERHOOK_AUXSWITCH is not actively enabled")
 
 if "bool do_user_takeoff_relative(float climb_alt_cm, bool must_navigate);" not in mode_h:
     raise SystemExit("relative takeoff API declaration missing")
