@@ -446,10 +446,22 @@ void Copter::userhook_50Hz()
         } else if (!ap.in_arming_delay &&
                    motors->get_interlock() &&
                    (motors->get_spool_state() == AP_Motors::SpoolState::THROTTLE_UNLIMITED)) {
+            if (failsafe.radio || !onekey_rc_input_fresh()) {
+                if (ap.land_complete) {
+                    (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
+                }
+                onekey_reset_takeoff_state();
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: RC lost before takeoff");
+            } else if (!position_ok()) {
+                if (ap.land_complete) {
+                    (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
+                }
+                onekey_reset_takeoff_state();
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: position lost before takeoff");
             // This is deliberately delayed until after the normal ArduPilot
             // arming delay and motor spool-up. Starting Takeoff earlier skips
             // the landed/pre-takeoff branch that requests motor spool-up.
-            if (!ap.land_complete) {
+            } else if (!ap.land_complete) {
                 onekey_reset_takeoff_state();
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO cancelled: no longer landed");
             } else if (!mode_loiter.do_user_takeoff_relative(onekey_pending_takeoff_alt_cm, true)) {
@@ -654,7 +666,6 @@ void Copter::userhook_auxSwitch1(const RC_Channel::AuxSwitchPos ch_flag)
     if (ch_flag == RC_Channel::AuxSwitchPos::LOW) {
         onekey_reset_takeoff_state();
         Mode::takeoff_stop();
-        set_auto_armed(false);
 
         // Down command is the native LAND mode. Returning the self-centering
         // switch to MIDDLE does not cancel LAND.
