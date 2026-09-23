@@ -133,6 +133,10 @@ public:
     virtual const char *name4() const = 0;
 
     bool do_user_takeoff(float takeoff_alt_cm, bool must_navigate);
+    // Start a user takeoff by a relative climb amount from the current Z target.
+    // Used by the local one-key takeoff feature to preserve PILOT_TKOFF_ALT
+    // semantics without converting it to an absolute altitude.
+    bool do_user_takeoff_relative(float climb_alt_cm, bool must_navigate);
     virtual bool is_taking_off() const;
     static void takeoff_stop() { takeoff.stop(); }
 
