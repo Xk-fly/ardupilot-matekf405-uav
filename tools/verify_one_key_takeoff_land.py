@@ -8,22 +8,24 @@ mode_h = (root / "ArduCopter/mode.h").read_text(encoding="utf-8")
 takeoff = (root / "ArduCopter/takeoff.cpp").read_text(encoding="utf-8")
 
 required_user = [
-    "ONEKEY_STICK_CENTER_TOLERANCE_PWM 80",
     "ONEKEY_RC_INPUT_TIMEOUT_MS 500U",
+    "ONEKEY_TAKEOFF_LIFTOFF_TIMEOUT_MS 3000U",
+    "static bool onekey_takeoff_watchdog_active = false;",
+    "static uint32_t onekey_takeoff_watchdog_start_ms = 0U;",
     "static bool center_seen = false;",
     "if (ch_flag == RC_Channel::AuxSwitchPos::MIDDLE)",
     "if (!center_seen)",
     "if (!onekey_rc_input_fresh())",
     "if (motors->armed() || arming.is_armed())",
     "if (!ap.land_complete)",
-    "!onekey_channel_centered(channel_roll)",
-    "!onekey_channel_centered(channel_pitch)",
-    "!onekey_channel_centered(channel_throttle)",
-    "!onekey_channel_centered(channel_yaw)",
     "if (!position_ok())",
     "set_mode(Mode::Number::LOITER, ModeReason::RC_COMMAND)",
     "arming.arm(AP_Arming::Method::AUXSWITCH, true)",
     "mode_loiter.do_user_takeoff_relative(takeoff_alt_cm, true)",
+    "onekey_takeoff_watchdog_start_ms = AP_HAL::millis();",
+    "onekey_takeoff_watchdog_active = true;",
+    "Mode::takeoff_stop();",
+    "OneKey TO abort: no liftoff in 3s, disarmed",
     "arming.disarm(AP_Arming::Method::AUXSWITCH)",
     "set_mode(Mode::Number::LAND, ModeReason::RC_COMMAND)",
 ]
@@ -53,6 +55,24 @@ required_takeoff = [
 for item in required_takeoff:
     if item not in takeoff:
         raise SystemExit(f"relative takeoff safety gate missing: {item}")
+
+
+# V2 test-build intentionally removes the four-stick precondition while keeping
+# normal ArduPilot arming checks. The obsolete gate must not remain in source.
+for forbidden in [
+    "ONEKEY_STICK_CENTER_TOLERANCE_PWM",
+    "onekey_channel_centered(",
+    "sticks not centered",
+]:
+    if forbidden in user:
+        raise SystemExit(f"obsolete one-key stick gate still present: {forbidden}")
+
+# The watchdog must run from the existing 50 Hz user hook so the 3 s timeout
+# is independent of further aux-switch movements.
+hook_i = user.index("void Copter::userhook_50Hz()")
+abort_i = user.index("OneKey TO abort: no liftoff in 3s, disarmed")
+if abort_i < hook_i:
+    raise SystemExit("one-key liftoff watchdog is not serviced from userhook_50Hz")
 
 # The takeoff callback must mode-switch before arming, and arm before starting takeoff.
 loiter_i = user.index("set_mode(Mode::Number::LOITER, ModeReason::RC_COMMAND)")
