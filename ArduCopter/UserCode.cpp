@@ -421,7 +421,7 @@ void Copter::userhook_50Hz()
             Mode::takeoff_stop();
             onekey_takeoff_watchdog_active = false;
 
-            const bool disarmed = arming.disarm(AP_Arming::Method::AUXSWITCH);
+            const bool disarmed = arming.disarm(AP_Arming::Method::AUXSWITCH, false);
             if (disarmed) {
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
                               "OneKey TO abort: no liftoff in 3s, disarmed");
