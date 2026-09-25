@@ -2,13 +2,14 @@
 
 #define MY_CUSTOM_LED_PIN 59
 
-// One-key takeoff / landing on USER_FUNC1 (intended for the self-centering RC7).
+// One-key takeoff / landing on USER_FUNC1 (intended for the self-centering RC8).
 // HIGH edge: disarmed+landed -> LOITER -> normal arming checks -> relative
 // PILOT_TKOFF_ALT takeoff -> remain in LOITER.
 // LOW edge: if armed, enter native LAND.
 // MIDDLE only re-arms the edge detector; returning to center never changes mode.
 #define ONEKEY_RC_INPUT_TIMEOUT_MS 500U
 #define ONEKEY_SPOOL_READY_TIMEOUT_MS 5000U
+#define ONEKEY_IDLE_HOLD_MS 1000U
 #define ONEKEY_TAKEOFF_LIFTOFF_TIMEOUT_MS 3000U
 #define ONEKEY_LIFTOFF_CONFIRM_CM 12.0f
 #define ONEKEY_LIFTOFF_ABORT_MAX_CM 8.0f
@@ -21,6 +22,7 @@ namespace {
 enum class OneKeyTakeoffState : uint8_t {
     IDLE = 0,
     WAIT_SPOOL,
+    WAIT_IDLE_HOLD,
     WAIT_LIFTOFF
 };
 
@@ -36,7 +38,6 @@ static OneKeyTakeoffState onekey_takeoff_state = OneKeyTakeoffState::IDLE;
 static uint32_t onekey_takeoff_phase_start_ms = 0U;
 static uint32_t onekey_liftoff_above_since_ms = 0U;
 static float onekey_pending_takeoff_alt_cm = 0.0f;
-static float onekey_takeoff_start_inertial_z_cm = 0.0f;
 
 static void onekey_reset_takeoff_state()
 {
@@ -44,25 +45,24 @@ static void onekey_reset_takeoff_state()
     onekey_takeoff_phase_start_ms = 0U;
     onekey_liftoff_above_since_ms = 0U;
     onekey_pending_takeoff_alt_cm = 0.0f;
-    onekey_takeoff_start_inertial_z_cm = 0.0f;
 }
 
 } // namespace
 
-// MatekF405 + RZ7889 RC9 hardware-PWM gimbal control.
+// MatekF405 + RZ7889 RC7 hardware-PWM gimbal control.
 // Hardware path:
 //   M5 / PA15 / TIM2_CH1 / PWM5 -> RZ7889 A1
 //   M6 / PA8  / TIM1_CH1 / PWM6 -> RZ7889 B1
 // RCOutput owns the timer mode/frequency; SRV_Channels owns all periodic values.
 #if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
-#define GIMBAL_RZ7889_RC9_CONTROL_ENABLED 1
+#define GIMBAL_RZ7889_RC7_CONTROL_ENABLED 1
 #else
-#define GIMBAL_RZ7889_RC9_CONTROL_ENABLED 0
+#define GIMBAL_RZ7889_RC7_CONTROL_ENABLED 0
 #endif
 #define GIMBAL_PWM5_CH 4U
 #define GIMBAL_PWM6_CH 5U
 #define GIMBAL_PWM_CH_MASK ((1UL << GIMBAL_PWM5_CH) | (1UL << GIMBAL_PWM6_CH))
-#define GIMBAL_RC9_INDEX 8U
+#define GIMBAL_RC7_INDEX 6U
 #define GIMBAL_RC_CENTER_PWM 1500U
 #define GIMBAL_RC_DEADZONE_PWM 80U
 #define GIMBAL_RC_INPUT_TIMEOUT_MS 500U
@@ -86,7 +86,7 @@ static void onekey_reset_takeoff_state()
 #define GIMBAL_AUTO_HOME_DUTY_PERCENT 20U
 #define GIMBAL_AUTO_HOME_USE_M5_DIRECTION 1
 
-#if GIMBAL_RZ7889_RC9_CONTROL_ENABLED
+#if GIMBAL_RZ7889_RC7_CONTROL_ENABLED
 namespace {
 
 static constexpr SRV_Channel::Aux_servo_function_t GIMBAL_M5_SRV_FUNCTION = SRV_Channel::k_scripting1;
@@ -121,13 +121,13 @@ static uint16_t gimbal_duty_to_pwm(const uint8_t duty_percent)
     return uint16_t(uint32_t(gimbal_pwm_min) + ((span * duty + 50U) / 100U));
 }
 
-static bool gimbal_read_rc9_pwm(uint16_t &rc_pwm)
+static bool gimbal_read_rc7_pwm(uint16_t &rc_pwm)
 {
     if (!rc().has_valid_input()) {
         return false;
     }
 
-    if (RC_Channels::get_valid_channel_count() <= GIMBAL_RC9_INDEX) {
+    if (RC_Channels::get_valid_channel_count() <= GIMBAL_RC7_INDEX) {
         return false;
     }
 
@@ -136,12 +136,12 @@ static bool gimbal_read_rc9_pwm(uint16_t &rc_pwm)
         return false;
     }
 
-    RC_Channel *rc9 = rc().channel(GIMBAL_RC9_INDEX);
-    if (rc9 == nullptr) {
+    RC_Channel *rc7 = rc().channel(GIMBAL_RC7_INDEX);
+    if (rc7 == nullptr) {
         return false;
     }
 
-    const int16_t radio_in = rc9->get_radio_in();
+    const int16_t radio_in = rc7->get_radio_in();
     if ((radio_in < int16_t(GIMBAL_RC_MIN_VALID_PWM)) ||
         (radio_in > int16_t(GIMBAL_RC_MAX_VALID_PWM))) {
         return false;
@@ -159,10 +159,10 @@ static bool gimbal_rc_pwm_in_deadzone(const uint16_t rc_pwm)
 }
 #endif
 
-static void gimbal_update_manual_request_from_rc9()
+static void gimbal_update_manual_request_from_rc7()
 {
     uint16_t rc_pwm = GIMBAL_RC_CENTER_PWM;
-    if (!gimbal_read_rc9_pwm(rc_pwm)) {
+    if (!gimbal_read_rc7_pwm(rc_pwm)) {
         gimbal_request_drive(GimbalDrive::Stop, 0);
         return;
     }
@@ -196,7 +196,7 @@ static bool gimbal_update_auto_home_request()
 
     if (!home_started) {
         uint16_t rc_pwm = GIMBAL_RC_CENTER_PWM;
-        if (!gimbal_read_rc9_pwm(rc_pwm) || !gimbal_rc_pwm_in_deadzone(rc_pwm)) {
+        if (!gimbal_read_rc7_pwm(rc_pwm) || !gimbal_rc_pwm_in_deadzone(rc_pwm)) {
             gimbal_request_drive(GimbalDrive::Stop, 0);
             return true;
         }
@@ -361,7 +361,7 @@ void Copter::userhook_init()
     hal.gpio->pinMode(MY_CUSTOM_LED_PIN, HAL_GPIO_OUTPUT);
     hal.gpio->write(MY_CUSTOM_LED_PIN, 1);
 
-#if GIMBAL_RZ7889_RC9_CONTROL_ENABLED
+#if GIMBAL_RZ7889_RC7_CONTROL_ENABLED
     gimbal_request_drive(GimbalDrive::Stop, 0);
 
     // Align RCOutput brushed scaling with the current MOT_PWM_MIN/MAX values.
@@ -411,7 +411,7 @@ void Copter::userhook_init()
 #ifdef USERHOOK_FASTLOOP
 void Copter::userhook_FastLoop()
 {
-#if GIMBAL_RZ7889_RC9_CONTROL_ENABLED
+#if GIMBAL_RZ7889_RC7_CONTROL_ENABLED
     // Copter schedules this hook at 100 Hz, allowing a real 10 ms envelope
     // window. The 1 kHz carrier itself remains generated by hardware timers.
     gimbal_apply_hardware_pwm();
@@ -458,13 +458,49 @@ void Copter::userhook_50Hz()
                 }
                 onekey_reset_takeoff_state();
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: position lost before takeoff");
-            // This is deliberately delayed until after the normal ArduPilot
-            // arming delay and motor spool-up. Starting Takeoff earlier skips
-            // the landed/pre-takeoff branch that requests motor spool-up.
             } else if (!ap.land_complete) {
                 onekey_reset_takeoff_state();
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO cancelled: no longer landed");
-            } else if (!mode_loiter.do_user_takeoff_relative(onekey_pending_takeoff_alt_cm, true)) {
+            } else {
+                // Motor spool is genuinely ready. Hold normal idle for one
+                // second before starting Takeoff so all four ESC/motors have
+                // time to establish a repeatable running state.
+                onekey_takeoff_state = OneKeyTakeoffState::WAIT_IDLE_HOLD;
+                onekey_takeoff_phase_start_ms = onekey_now_ms;
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey motor spool ready; idle hold 1s");
+            }
+        }
+    } else if (onekey_takeoff_state == OneKeyTakeoffState::WAIT_IDLE_HOLD) {
+        if (!motors->armed()) {
+            onekey_reset_takeoff_state();
+        } else if (flightmode != &mode_loiter) {
+            if (ap.land_complete) {
+                (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
+            }
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO cancelled: mode changed during idle");
+        } else if (failsafe.radio || !onekey_rc_input_fresh()) {
+            if (ap.land_complete) {
+                (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
+            }
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: RC lost during idle");
+        } else if (!position_ok()) {
+            if (ap.land_complete) {
+                (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
+            }
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: position lost during idle");
+        } else if (!ap.land_complete) {
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO cancelled: no longer landed");
+        } else if (!motors->get_interlock() ||
+                   (motors->get_spool_state() != AP_Motors::SpoolState::THROTTLE_UNLIMITED)) {
+            (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "OneKey TO abort: motor spool lost during idle");
+        } else if ((onekey_now_ms - onekey_takeoff_phase_start_ms) >= ONEKEY_IDLE_HOLD_MS) {
+            if (!mode_loiter.do_user_takeoff_relative(onekey_pending_takeoff_alt_cm, true)) {
                 (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
                 onekey_reset_takeoff_state();
                 GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "OneKey TO failed: takeoff start");
@@ -472,8 +508,7 @@ void Copter::userhook_50Hz()
                 onekey_takeoff_state = OneKeyTakeoffState::WAIT_LIFTOFF;
                 onekey_takeoff_phase_start_ms = onekey_now_ms;
                 onekey_liftoff_above_since_ms = 0U;
-                onekey_takeoff_start_inertial_z_cm = inertial_nav.get_position_z_up_cm();
-                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey spool ready; takeoff %.0fcm",
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey idle complete; takeoff %.0fcm",
                               double(onekey_pending_takeoff_alt_cm));
             }
         }
@@ -488,8 +523,6 @@ void Copter::userhook_50Hz()
         } else {
             int32_t range_alt_cm = 0;
             const bool range_valid = get_rangefinder_height_interpolated_cm(range_alt_cm);
-            const float inertial_delta_cm =
-                inertial_nav.get_position_z_up_cm() - onekey_takeoff_start_inertial_z_cm;
 
             // Prefer a physical rangefinder confirmation. The short hold time
             // rejects a single transient sample while remaining responsive.
@@ -510,14 +543,13 @@ void Copter::userhook_50Hz()
             if ((onekey_takeoff_state == OneKeyTakeoffState::WAIT_LIFTOFF) &&
                 ((onekey_now_ms - onekey_takeoff_phase_start_ms) >=
                  ONEKEY_TAKEOFF_LIFTOFF_TIMEOUT_MS)) {
-                // Only auto-disarm when sensors positively say the vehicle is
-                // still on/very near the ground. If range is unavailable or
-                // the vehicle may already be airborne, fail safe by keeping
-                // it armed and merely ending this watchdog.
+                // At the 3 s deadline, trust the healthy downward rangefinder:
+                // <=8 cm means the vehicle is still physically on/very near
+                // the ground. Do not let barometer/EKF-Z drift veto this check.
+                // If range is unavailable, never risk an airborne auto-disarm.
                 const bool definitely_not_lifted =
                     range_valid &&
-                    (range_alt_cm <= int32_t(ONEKEY_LIFTOFF_ABORT_MAX_CM)) &&
-                    (inertial_delta_cm < 15.0f);
+                    (range_alt_cm <= int32_t(ONEKEY_LIFTOFF_ABORT_MAX_CM));
 
                 if (definitely_not_lifted) {
                     Mode::takeoff_stop();
@@ -558,10 +590,10 @@ void Copter::userhook_50Hz()
         last_toggle_time_ms = now_ms;
     }
 
-#if GIMBAL_RZ7889_RC9_CONTROL_ENABLED
+#if GIMBAL_RZ7889_RC7_CONTROL_ENABLED
     gimbal_periodic_hw_pwm_check();
     if (!gimbal_update_auto_home_request()) {
-        gimbal_update_manual_request_from_rc9();
+        gimbal_update_manual_request_from_rc7();
     }
 #endif
 }
