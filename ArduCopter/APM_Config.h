@@ -44,10 +44,10 @@
 #if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
 #define USERHOOK_INIT userhook_init();                      // for code to be run once at startup
 #define USERHOOK_FASTLOOP userhook_FastLoop();              // 100Hz density envelope; timer still generates 1kHz PWM
-#define USERHOOK_50HZLOOP userhook_50Hz();                  // for RC9 direction/control updates at 50hz
+#define USERHOOK_50HZLOOP userhook_50Hz();                  // for RC7 gimbal + RC8 OneKey state updates at 50hz
 #endif
 //#define USERHOOK_MEDIUMLOOP userhook_MediumLoop();        // for code to be run at 10hz
 //#define USERHOOK_SLOWLOOP userhook_SlowLoop();            // for code to be run at 3.3hz
 //#define USERHOOK_SUPERSLOWLOOP userhook_SuperSlowLoop();  // for code to be run at 1hz
-#define USERHOOK_AUXSWITCH ENABLED                         // RC USER_FUNC1: one-key takeoff/land
+#define USERHOOK_AUXSWITCH ENABLED                         // RC8 USER_FUNC1: one-key takeoff/land (set RC8_OPTION=47)
 //#define USER_PARAMS_ENABLED ENABLED                       // to enable user parameters
