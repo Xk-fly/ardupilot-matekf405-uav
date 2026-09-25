@@ -5,6 +5,7 @@ on:
     branches:
       - feature/baro-stability-ap457
       - feature/one-key-takeoff-land
+      - feature/rc8-onekey-rc7-gimbal
   workflow_dispatch:
 
 permissions:
@@ -37,6 +38,11 @@ jobs:
         if: github.ref_name == 'feature/one-key-takeoff-land'
         run: |
           python3 tools/verify_one_key_takeoff_land.py
+
+      - name: Verify RC8 OneKey + RC7 density gimbal integration
+        if: github.ref_name == 'feature/rc8-onekey-rc7-gimbal'
+        run: |
+          python3 tools/verify_rc8_onekey_rc7_gimbal.py
 
       - name: Configure MatekF405-UAV
         run: |
