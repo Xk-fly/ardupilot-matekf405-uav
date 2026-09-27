@@ -35,7 +35,7 @@ required = [
     "loiter_nav->init_target();",
     "AutoSrc GPS handover complete",
     "AutoSrc Flow recovery complete",
-    "AS S%u st%u G%u F%u q%u r%ld h%.0f",
+    "AS S%u st%u G%uN%u F%u P%u%u q%u r%ld h%.0f",
 ]
 for item in required:
     if item not in user:
