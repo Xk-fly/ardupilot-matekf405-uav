@@ -6,6 +6,7 @@ on:
       - feature/baro-stability-ap457
       - feature/one-key-takeoff-land
       - feature/rc8-onekey-rc7-gimbal
+      - feature/auto-indoor-outdoor-loiter
   workflow_dispatch:
 
 permissions:
@@ -43,6 +44,11 @@ jobs:
         if: github.ref_name == 'feature/rc8-onekey-rc7-gimbal'
         run: |
           python3 tools/verify_rc8_onekey_rc7_gimbal.py
+
+      - name: Verify automatic indoor/outdoor source integration
+        if: github.ref_name == 'feature/auto-indoor-outdoor-loiter'
+        run: |
+          python3 tools/verify_auto_indoor_outdoor_loiter.py
 
       - name: Configure MatekF405-UAV
         run: |
