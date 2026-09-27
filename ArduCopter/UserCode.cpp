@@ -699,11 +699,14 @@ void Copter::userhook_50Hz()
     if ((onekey_now_ms - autosrc_last_diag_ms) >= AUTOSRC_DIAG_PERIOD_MS) {
         autosrc_last_diag_ms = onekey_now_ms;
         GCS_SEND_TEXT(MAV_SEVERITY_INFO,
-                      "AS S%u st%u G%u F%u q%u r%ld h%.0f",
+                      "AS S%u st%u G%uN%u F%u P%u%u q%u r%ld h%.0f",
                       unsigned(AP::ahrs().get_posvelyaw_source_set() + 1U),
                       unsigned(autosrc_state),
                       unsigned(autosrc_gps_raw_ready),
+                      unsigned(autosrc_gps_nav_ready),
                       unsigned(autosrc_flow_ground_ready || autosrc_flow_air_ready),
+                      unsigned(autosrc_filter.flags.horiz_pos_abs),
+                      unsigned(autosrc_filter.flags.horiz_pos_rel),
                       unsigned(optflow.quality()),
                       long(autosrc_range_valid ? autosrc_range_cm : -1),
                       double(autosrc_alt_cm));
