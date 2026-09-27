@@ -3,11 +3,12 @@
 #define MY_CUSTOM_LED_PIN 59
 
 // One-key takeoff / landing on USER_FUNC1 (intended for the self-centering RC8).
-// HIGH edge: disarmed+landed -> LOITER -> normal arming checks -> relative
-// PILOT_TKOFF_ALT takeoff -> remain in LOITER.
+// HIGH edge: disarmed+landed -> wait for automatic Flow/GPS position -> LOITER
+// -> normal arming checks -> relative PILOT_TKOFF_ALT takeoff -> remain in LOITER.
 // LOW edge: if armed, enter native LAND.
 // MIDDLE only re-arms the edge detector; returning to center never changes mode.
 #define ONEKEY_RC_INPUT_TIMEOUT_MS 500U
+#define ONEKEY_POSITION_WAIT_TIMEOUT_MS 90000U
 #define ONEKEY_SPOOL_READY_TIMEOUT_MS 5000U
 #define ONEKEY_IDLE_HOLD_MS 1000U
 #define ONEKEY_TAKEOFF_LIFTOFF_TIMEOUT_MS 3000U
@@ -17,10 +18,42 @@
 #define ONEKEY_MIN_TAKEOFF_ALT_CM 10.0f
 #define ONEKEY_MAX_TAKEOFF_ALT_CM 1000.0f
 
+// Automatic indoor/outdoor source manager.
+// Source-set contract for this build:
+//   SRC1 (index 0): GPS position + GPS velocity + Baro Z + Compass yaw
+//   SRC2 (index 1): no XY position + OpticalFlow velocity + Baro Z + Compass yaw
+// Normal takeoff prefers SRC2 whenever low-altitude Flow/Range is healthy.
+// In flight, SRC2 hands over once to SRC1 after GPS and height/speed gates pass.
+// SRC1 only falls back to SRC2 on GPS failure and only while Flow/Range is usable.
+#if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
+#define AUTO_SOURCE_MANAGER_ENABLED 1
+#else
+#define AUTO_SOURCE_MANAGER_ENABLED 0
+#endif
+#define AUTOSRC_GPS_SOURCE_SET 0U
+#define AUTOSRC_FLOW_SOURCE_SET 1U
+#define AUTOSRC_GPS_MIN_SATS 8U
+#define AUTOSRC_GPS_MAX_HDOP 180U
+#define AUTOSRC_GPS_RAW_HOLD_MS 3000U
+#define AUTOSRC_GPS_NAV_CONFIRM_MS 1000U
+#define AUTOSRC_GPS_HANDOVER_TIMEOUT_MS 5000U
+#define AUTOSRC_GPS_LOSS_HOLD_MS 2000U
+#define AUTOSRC_FLOW_MIN_QUALITY 50U
+#define AUTOSRC_FLOW_FRESH_MS 350U
+#define AUTOSRC_FLOW_GROUND_MAX_CM 30
+#define AUTOSRC_FLOW_AIR_MAX_CM 250
+#define AUTOSRC_FLOW_READY_HOLD_MS 800U
+#define AUTOSRC_FLOW_LOSS_HOLD_MS 1200U
+#define AUTOSRC_GPS_SWITCH_ALT_CM 150.0f
+#define AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS 60.0f
+#define AUTOSRC_DIAG_PERIOD_MS 5000U
+#define AUTOSRC_BOOT_SETTLE_MS 1500U
+
 namespace {
 
 enum class OneKeyTakeoffState : uint8_t {
     IDLE = 0,
+    WAIT_POSITION,
     WAIT_SPOOL,
     WAIT_IDLE_HOLD,
     WAIT_LIFTOFF
@@ -38,6 +71,39 @@ static OneKeyTakeoffState onekey_takeoff_state = OneKeyTakeoffState::IDLE;
 static uint32_t onekey_takeoff_phase_start_ms = 0U;
 static uint32_t onekey_liftoff_above_since_ms = 0U;
 static float onekey_pending_takeoff_alt_cm = 0.0f;
+
+#if AUTO_SOURCE_MANAGER_ENABLED
+enum class AutoSourceState : uint8_t {
+    INIT = 0,
+    FLOW_GROUND,
+    FLOW_ACTIVE,
+    GPS_GROUND,
+    GPS_HANDOVER,
+    GPS_ACTIVE,
+    FLOW_RECOVERY,
+};
+
+static AutoSourceState autosrc_state = AutoSourceState::INIT;
+static uint32_t autosrc_boot_ms = 0U;
+static uint32_t autosrc_gps_raw_since_ms = 0U;
+static uint32_t autosrc_gps_nav_since_ms = 0U;
+static uint32_t autosrc_gps_bad_since_ms = 0U;
+static uint32_t autosrc_flow_ground_since_ms = 0U;
+static uint32_t autosrc_flow_air_since_ms = 0U;
+static uint32_t autosrc_flow_bad_since_ms = 0U;
+static uint32_t autosrc_transition_start_ms = 0U;
+static uint32_t autosrc_last_diag_ms = 0U;
+
+static void autosrc_select_source(const uint8_t source_set, const char *reason)
+{
+    AP_AHRS &ahrs_ref = AP::ahrs();
+    if (ahrs_ref.get_posvelyaw_source_set() != source_set) {
+        ahrs_ref.set_posvelyaw_source_set(source_set);
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AutoSrc -> SRC%u %s",
+                      unsigned(source_set + 1U), reason);
+    }
+}
+#endif
 
 static void onekey_reset_takeoff_state()
 {
@@ -361,6 +427,12 @@ void Copter::userhook_init()
     hal.gpio->pinMode(MY_CUSTOM_LED_PIN, HAL_GPIO_OUTPUT);
     hal.gpio->write(MY_CUSTOM_LED_PIN, 1);
 
+#if AUTO_SOURCE_MANAGER_ENABLED
+    autosrc_boot_ms = AP_HAL::millis();
+    autosrc_state = AutoSourceState::INIT;
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AutoSrc enabled: low Flow, high GPS");
+#endif
+
 #if GIMBAL_RZ7889_RC7_CONTROL_ENABLED
     gimbal_request_drive(GimbalDrive::Stop, 0);
 
@@ -424,7 +496,249 @@ void Copter::userhook_50Hz()
 {
     const uint32_t onekey_now_ms = AP_HAL::millis();
 
-    if (onekey_takeoff_state == OneKeyTakeoffState::WAIT_SPOOL) {
+#if AUTO_SOURCE_MANAGER_ENABLED
+    // ---------- automatic indoor/outdoor source selection ----------
+    nav_filter_status autosrc_filter = inertial_nav.get_filter_status();
+    AP_GPS &autosrc_gps = AP::gps();
+
+    int32_t autosrc_range_cm = 0;
+    const bool autosrc_range_valid =
+        get_rangefinder_height_interpolated_cm(autosrc_range_cm);
+
+    const bool autosrc_flow_sensor_ok =
+        optflow.enabled() &&
+        optflow.healthy() &&
+        (optflow.quality() >= AUTOSRC_FLOW_MIN_QUALITY) &&
+        ((onekey_now_ms - optflow.last_update()) <= AUTOSRC_FLOW_FRESH_MS);
+
+    const bool autosrc_flow_ground_now =
+        autosrc_flow_sensor_ok &&
+        autosrc_range_valid &&
+        (autosrc_range_cm >= int32_t(ONEKEY_LIFTOFF_ABORT_MAX_CM / 2.0f)) &&
+        (autosrc_range_cm <= AUTOSRC_FLOW_GROUND_MAX_CM);
+
+    const bool autosrc_flow_air_now =
+        autosrc_flow_sensor_ok &&
+        autosrc_range_valid &&
+        (autosrc_range_cm >= int32_t(ONEKEY_LIFTOFF_ABORT_MAX_CM / 2.0f)) &&
+        (autosrc_range_cm <= AUTOSRC_FLOW_AIR_MAX_CM);
+
+    const AP_GPS::GPS_Status autosrc_gps_status = autosrc_gps.status();
+    const uint8_t autosrc_sats = autosrc_gps.num_sats();
+    const uint16_t autosrc_hdop = autosrc_gps.get_hdop();
+    const bool autosrc_gps_raw_now =
+        (autosrc_gps_status >= AP_GPS::GPS_OK_FIX_3D) &&
+        (autosrc_sats >= AUTOSRC_GPS_MIN_SATS) &&
+        (autosrc_hdop > 0U) &&
+        (autosrc_hdop <= AUTOSRC_GPS_MAX_HDOP) &&
+        autosrc_filter.flags.gps_quality_good;
+
+    const bool autosrc_gps_nav_now =
+        autosrc_filter.flags.horiz_pos_abs &&
+        autosrc_filter.flags.using_gps &&
+        autosrc_filter.flags.gps_quality_good &&
+        !autosrc_filter.flags.gps_glitching &&
+        !autosrc_filter.flags.const_pos_mode;
+
+    auto update_hold = [onekey_now_ms](const bool condition, uint32_t &since_ms) {
+        if (condition) {
+            if (since_ms == 0U) {
+                since_ms = onekey_now_ms;
+            }
+        } else {
+            since_ms = 0U;
+        }
+    };
+
+    update_hold(autosrc_gps_raw_now, autosrc_gps_raw_since_ms);
+    update_hold(autosrc_gps_nav_now, autosrc_gps_nav_since_ms);
+    update_hold(autosrc_flow_ground_now, autosrc_flow_ground_since_ms);
+    update_hold(autosrc_flow_air_now, autosrc_flow_air_since_ms);
+
+    const bool autosrc_gps_raw_ready =
+        (autosrc_gps_raw_since_ms != 0U) &&
+        ((onekey_now_ms - autosrc_gps_raw_since_ms) >= AUTOSRC_GPS_RAW_HOLD_MS);
+    const bool autosrc_gps_nav_ready =
+        (autosrc_gps_nav_since_ms != 0U) &&
+        ((onekey_now_ms - autosrc_gps_nav_since_ms) >= AUTOSRC_GPS_NAV_CONFIRM_MS);
+    const bool autosrc_flow_ground_ready =
+        (autosrc_flow_ground_since_ms != 0U) &&
+        ((onekey_now_ms - autosrc_flow_ground_since_ms) >= AUTOSRC_FLOW_READY_HOLD_MS);
+    const bool autosrc_flow_air_ready =
+        (autosrc_flow_air_since_ms != 0U) &&
+        ((onekey_now_ms - autosrc_flow_air_since_ms) >= AUTOSRC_FLOW_READY_HOLD_MS);
+
+    const uint8_t autosrc_active_set = AP::ahrs().get_posvelyaw_source_set();
+    const float autosrc_alt_cm = inertial_nav.get_position_z_up_cm();
+    const float autosrc_xy_speed_cms = inertial_nav.get_velocity_xy_cms().length();
+
+    // On the ground, Flow is the preferred takeoff source whenever it is
+    // healthy. If it is unavailable, a stable GPS solution is the fallback.
+    if (!motors->armed() && ap.land_complete &&
+        ((onekey_now_ms - autosrc_boot_ms) >= AUTOSRC_BOOT_SETTLE_MS)) {
+        autosrc_gps_bad_since_ms = 0U;
+        autosrc_flow_bad_since_ms = 0U;
+
+        if (autosrc_flow_ground_ready) {
+            autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "Flow takeoff");
+            autosrc_state = AutoSourceState::FLOW_GROUND;
+        } else if (autosrc_gps_raw_ready) {
+            autosrc_select_source(AUTOSRC_GPS_SOURCE_SET, "GPS fallback");
+            autosrc_state = AutoSourceState::GPS_GROUND;
+        }
+    } else if (motors->armed() && !ap.land_complete) {
+        // Normal path: Flow owns low altitude. Once raw GPS has been stable,
+        // altitude is above the transition band, and horizontal motion is low,
+        // request GPS. Flow -> GPS is one-way for normal flight to prevent
+        // chatter; GPS -> Flow is reserved for an actual GPS failure.
+        if ((autosrc_active_set == AUTOSRC_FLOW_SOURCE_SET) &&
+            (autosrc_state != AutoSourceState::FLOW_RECOVERY)) {
+            autosrc_state = AutoSourceState::FLOW_ACTIVE;
+
+            if (!autosrc_flow_air_now) {
+                if (autosrc_flow_bad_since_ms == 0U) {
+                    autosrc_flow_bad_since_ms = onekey_now_ms;
+                }
+            } else {
+                autosrc_flow_bad_since_ms = 0U;
+            }
+
+            const bool flow_failed =
+                (autosrc_flow_bad_since_ms != 0U) &&
+                ((onekey_now_ms - autosrc_flow_bad_since_ms) >= AUTOSRC_FLOW_LOSS_HOLD_MS);
+
+            const bool normal_gps_gate =
+                autosrc_gps_raw_ready &&
+                (autosrc_alt_cm >= AUTOSRC_GPS_SWITCH_ALT_CM) &&
+                (autosrc_xy_speed_cms <= AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS) &&
+                (flightmode == &mode_loiter);
+
+            const bool emergency_gps_gate =
+                flow_failed &&
+                autosrc_gps_raw_ready &&
+                (flightmode == &mode_loiter);
+
+            if (normal_gps_gate || emergency_gps_gate) {
+                autosrc_select_source(AUTOSRC_GPS_SOURCE_SET,
+                                      emergency_gps_gate ? "Flow lost" : "high-alt GPS");
+                autosrc_transition_start_ms = onekey_now_ms;
+                autosrc_gps_nav_since_ms = 0U;
+                autosrc_state = AutoSourceState::GPS_HANDOVER;
+            }
+        } else if (autosrc_state == AutoSourceState::GPS_HANDOVER) {
+            if (autosrc_gps_nav_ready) {
+                if (flightmode == &mode_loiter) {
+                    // Re-anchor the Loiter target after EKF relative->absolute
+                    // position reset. This avoids commanding the old Flow-frame
+                    // target in the new GPS frame.
+                    loiter_nav->init_target();
+                }
+                autosrc_state = AutoSourceState::GPS_ACTIVE;
+                autosrc_gps_bad_since_ms = 0U;
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AutoSrc GPS handover complete");
+            } else if ((onekey_now_ms - autosrc_transition_start_ms) >=
+                       AUTOSRC_GPS_HANDOVER_TIMEOUT_MS) {
+                if (autosrc_flow_air_ready &&
+                    (autosrc_alt_cm <= float(AUTOSRC_FLOW_AIR_MAX_CM))) {
+                    autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "GPS handover timeout");
+                    autosrc_transition_start_ms = onekey_now_ms;
+                    autosrc_state = AutoSourceState::FLOW_RECOVERY;
+                } else {
+                    // Flow is not a safe fallback at this height. Leave GPS
+                    // selected and let normal EKF failsafe policy own the case.
+                    autosrc_state = AutoSourceState::GPS_ACTIVE;
+                    GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                                  "AutoSrc GPS handover slow; no safe Flow fallback");
+                }
+            }
+        } else if ((autosrc_active_set == AUTOSRC_GPS_SOURCE_SET) &&
+                   (autosrc_state != AutoSourceState::FLOW_RECOVERY)) {
+            if (autosrc_state != AutoSourceState::GPS_HANDOVER) {
+                autosrc_state = AutoSourceState::GPS_ACTIVE;
+            }
+
+            if (!autosrc_gps_nav_now) {
+                if (autosrc_gps_bad_since_ms == 0U) {
+                    autosrc_gps_bad_since_ms = onekey_now_ms;
+                }
+            } else {
+                autosrc_gps_bad_since_ms = 0U;
+            }
+
+            const bool gps_failed =
+                (autosrc_gps_bad_since_ms != 0U) &&
+                ((onekey_now_ms - autosrc_gps_bad_since_ms) >= AUTOSRC_GPS_LOSS_HOLD_MS);
+
+            if (gps_failed &&
+                autosrc_flow_air_ready &&
+                (autosrc_alt_cm <= float(AUTOSRC_FLOW_AIR_MAX_CM)) &&
+                (flightmode == &mode_loiter)) {
+                autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "GPS lost");
+                autosrc_transition_start_ms = onekey_now_ms;
+                autosrc_flow_air_since_ms = 0U;
+                autosrc_state = AutoSourceState::FLOW_RECOVERY;
+            }
+        }
+
+        if (autosrc_state == AutoSourceState::FLOW_RECOVERY) {
+            nav_filter_status recovery_filter = inertial_nav.get_filter_status();
+            if (recovery_filter.flags.horiz_pos_rel &&
+                !recovery_filter.flags.const_pos_mode) {
+                if (flightmode == &mode_loiter) {
+                    loiter_nav->init_target();
+                }
+                autosrc_state = AutoSourceState::FLOW_ACTIVE;
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                              "AutoSrc Flow recovery complete");
+            }
+        }
+    }
+
+    // Compact diagnostic line is intentionally periodic so flight logs show
+    // why a source was or was not selected without flooding MAVLink.
+    if ((onekey_now_ms - autosrc_last_diag_ms) >= AUTOSRC_DIAG_PERIOD_MS) {
+        autosrc_last_diag_ms = onekey_now_ms;
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                      "AS S%u st%u G%u F%u q%u r%ld h%.0f",
+                      unsigned(AP::ahrs().get_posvelyaw_source_set() + 1U),
+                      unsigned(autosrc_state),
+                      unsigned(autosrc_gps_raw_ready),
+                      unsigned(autosrc_flow_ground_ready || autosrc_flow_air_ready),
+                      unsigned(optflow.quality()),
+                      long(autosrc_range_valid ? autosrc_range_cm : -1),
+                      double(autosrc_alt_cm));
+    }
+#endif
+
+    // ---------- one-key takeoff / landing ----------
+    if (onekey_takeoff_state == OneKeyTakeoffState::WAIT_POSITION) {
+        if (motors->armed() || arming.is_armed()) {
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO cancelled: unexpectedly armed");
+        } else if (!ap.land_complete) {
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO cancelled: not landed");
+        } else if (failsafe.radio || !onekey_rc_input_fresh()) {
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: RC lost while waiting");
+        } else if ((onekey_now_ms - onekey_takeoff_phase_start_ms) >=
+                   ONEKEY_POSITION_WAIT_TIMEOUT_MS) {
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO timeout: no position");
+        } else if (position_ok()) {
+            if (!set_mode(Mode::Number::LOITER, ModeReason::RC_COMMAND)) {
+                onekey_reset_takeoff_state();
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: Loiter unavailable");
+            } else if (!arming.arm(AP_Arming::Method::AUXSWITCH, true)) {
+                onekey_reset_takeoff_state();
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: arming failed");
+            } else {
+                onekey_takeoff_phase_start_ms = onekey_now_ms;
+                onekey_takeoff_state = OneKeyTakeoffState::WAIT_SPOOL;
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey position ready; waiting motor spool");
+            }
+        }
+    } else if (onekey_takeoff_state == OneKeyTakeoffState::WAIT_SPOOL) {
         // The mode or arming state changed before takeoff began: cancel the
         // one-key sequence. If still safely landed, leave no armed vehicle
         // behind after an interrupted automatic sequence.
@@ -656,13 +970,6 @@ void Copter::userhook_auxSwitch1(const RC_Channel::AuxSwitchPos ch_flag)
             return;
         }
 
-        // LOITER must already have a valid absolute or relative position
-        // estimate. Never bypass ArduPilot's position checks.
-        if (!position_ok()) {
-            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: no position");
-            return;
-        }
-
         const float takeoff_alt_cm =
             constrain_float(float(g.pilot_takeoff_alt.get()),
                             ONEKEY_MIN_TAKEOFF_ALT_CM,
@@ -672,26 +979,14 @@ void Copter::userhook_auxSwitch1(const RC_Channel::AuxSwitchPos ch_flag)
             return;
         }
 
-        // Mode first, then arm. If LOITER cannot initialise, do not arm.
-        if (!set_mode(Mode::Number::LOITER, ModeReason::RC_COMMAND)) {
-            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: Loiter unavailable");
-            return;
-        }
-
-        // Keep all normal ArduPilot arming checks enabled.
-        if (!arming.arm(AP_Arming::Method::AUXSWITCH, true)) {
-            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO denied: arming failed");
-            return;
-        }
-
-        // Do NOT start Takeoff in this aux-switch callback. The motors need
-        // ArduPilot's normal arming delay and landed/pre-takeoff loop to reach
-        // THROTTLE_UNLIMITED first. userhook_50Hz() starts Takeoff only after
-        // the motor spool state is genuinely ready.
+        // Queue the command instead of demanding an already-valid position on
+        // the AUX edge. The automatic source manager may need a short time to
+        // establish Flow-relative or GPS-absolute position. All normal Loiter
+        // and ArduPilot arming checks are still enforced before motors arm.
         onekey_pending_takeoff_alt_cm = takeoff_alt_cm;
         onekey_takeoff_phase_start_ms = AP_HAL::millis();
-        onekey_takeoff_state = OneKeyTakeoffState::WAIT_SPOOL;
-        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey armed; waiting motor spool");
+        onekey_takeoff_state = OneKeyTakeoffState::WAIT_POSITION;
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey queued; waiting position");
         return;
     }
 
