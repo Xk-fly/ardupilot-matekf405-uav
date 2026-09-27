@@ -12,6 +12,7 @@ required = [
     "#define AUTOSRC_GPS_RAW_HOLD_MS 3000U",
     "#define AUTOSRC_GPS_NAV_CONFIRM_MS 1000U",
     "#define AUTOSRC_GPS_HANDOVER_TIMEOUT_MS 5000U",
+    "#define AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS 15000U",
     "#define AUTOSRC_GPS_LOSS_HOLD_MS 2000U",
     "#define AUTOSRC_FLOW_MIN_QUALITY 50U",
     "#define AUTOSRC_FLOW_AIR_MAX_CM 250",
@@ -30,12 +31,14 @@ required = [
     "!autosrc_filter.flags.gps_glitching",
     "autosrc_alt_cm >= AUTOSRC_GPS_SWITCH_ALT_CM",
     "autosrc_xy_speed_cms <= AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS",
+    "autosrc_gps_retry_ready",
+    "autosrc_last_handover_fail_ms = onekey_now_ms",
     'autosrc_select_source(AUTOSRC_GPS_SOURCE_SET,',
     'autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "GPS lost")',
     "loiter_nav->init_target();",
     "AutoSrc GPS handover complete",
     "AutoSrc Flow recovery complete",
-    "AS S%u st%u G%uN%u F%u P%u%u q%u r%ld h%.0f",
+    "AS S%u st%u G%uN%u C%u F%u P%u%u q%u r%ld h%.0f",
 ]
 for item in required:
     if item not in user:
@@ -48,11 +51,18 @@ gps_i = user.index("else if (autosrc_gps_raw_ready)", flow_i)
 if not (ground_i < flow_i < gps_i):
     raise SystemExit("ground source priority must remain Flow -> GPS fallback")
 
+# A failed normal handover must not immediately chatter back to GPS.
+if "AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS" not in user:
+    raise SystemExit("GPS handover retry cooldown missing")
+if "autosrc_last_handover_fail_ms = onekey_now_ms" not in user:
+    raise SystemExit("GPS handover timeout does not arm retry cooldown")
+
 # Normal handover must be gated by GPS stability, altitude, low XY speed and Loiter.
 gate_i = user.index("const bool normal_gps_gate")
 gate_text = user[gate_i:gate_i+900]
 for item in [
     "autosrc_gps_raw_ready",
+    "autosrc_gps_retry_ready",
     "autosrc_alt_cm >= AUTOSRC_GPS_SWITCH_ALT_CM",
     "autosrc_xy_speed_cms <= AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS",
     "flightmode == &mode_loiter",
@@ -71,6 +81,13 @@ for item in [
 ]:
     if item not in fallback_text:
         raise SystemExit(f"GPS emergency fallback guard missing: {item}")
+
+# Flow-loss emergency GPS acquisition is intentionally allowed to bypass the
+# normal retry cooldown because it may be the only remaining horizontal aid.
+emergency_i = user.index("const bool emergency_gps_gate")
+emergency_text = user[emergency_i:emergency_i+500]
+if "autosrc_gps_retry_ready" in emergency_text:
+    raise SystemExit("Flow-loss emergency GPS gate must bypass normal retry cooldown")
 
 # OneKey must now queue while waiting for automatic position rather than bypass checks.
 for item in [
