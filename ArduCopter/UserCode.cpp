@@ -37,6 +37,7 @@
 #define AUTOSRC_GPS_RAW_HOLD_MS 3000U
 #define AUTOSRC_GPS_NAV_CONFIRM_MS 1000U
 #define AUTOSRC_GPS_HANDOVER_TIMEOUT_MS 5000U
+#define AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS 15000U
 #define AUTOSRC_GPS_LOSS_HOLD_MS 2000U
 #define AUTOSRC_FLOW_MIN_QUALITY 50U
 #define AUTOSRC_FLOW_FRESH_MS 350U
@@ -92,6 +93,7 @@ static uint32_t autosrc_flow_ground_since_ms = 0U;
 static uint32_t autosrc_flow_air_since_ms = 0U;
 static uint32_t autosrc_flow_bad_since_ms = 0U;
 static uint32_t autosrc_transition_start_ms = 0U;
+static uint32_t autosrc_last_handover_fail_ms = 0U;
 static uint32_t autosrc_last_diag_ms = 0U;
 
 static void autosrc_select_source(const uint8_t source_set, const char *reason)
@@ -571,6 +573,10 @@ void Copter::userhook_50Hz()
     const uint8_t autosrc_active_set = AP::ahrs().get_posvelyaw_source_set();
     const float autosrc_alt_cm = inertial_nav.get_position_z_up_cm();
     const float autosrc_xy_speed_cms = inertial_nav.get_velocity_xy_cms().length();
+    const bool autosrc_gps_retry_ready =
+        (autosrc_last_handover_fail_ms == 0U) ||
+        ((onekey_now_ms - autosrc_last_handover_fail_ms) >=
+         AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS);
 
     // On the ground, Flow is the preferred takeoff source whenever it is
     // healthy. If it is unavailable, a stable GPS solution is the fallback.
@@ -609,6 +615,7 @@ void Copter::userhook_50Hz()
 
             const bool normal_gps_gate =
                 autosrc_gps_raw_ready &&
+                autosrc_gps_retry_ready &&
                 (autosrc_alt_cm >= AUTOSRC_GPS_SWITCH_ALT_CM) &&
                 (autosrc_xy_speed_cms <= AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS) &&
                 (flightmode == &mode_loiter);
@@ -635,6 +642,7 @@ void Copter::userhook_50Hz()
                 }
                 autosrc_state = AutoSourceState::GPS_ACTIVE;
                 autosrc_gps_bad_since_ms = 0U;
+                autosrc_last_handover_fail_ms = 0U;
                 GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AutoSrc GPS handover complete");
             } else if ((onekey_now_ms - autosrc_transition_start_ms) >=
                        AUTOSRC_GPS_HANDOVER_TIMEOUT_MS) {
@@ -642,6 +650,7 @@ void Copter::userhook_50Hz()
                     (autosrc_alt_cm <= float(AUTOSRC_FLOW_AIR_MAX_CM))) {
                     autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "GPS handover timeout");
                     autosrc_transition_start_ms = onekey_now_ms;
+                    autosrc_last_handover_fail_ms = onekey_now_ms;
                     autosrc_state = AutoSourceState::FLOW_RECOVERY;
                 } else {
                     // Flow is not a safe fallback at this height. Leave GPS
@@ -699,11 +708,12 @@ void Copter::userhook_50Hz()
     if ((onekey_now_ms - autosrc_last_diag_ms) >= AUTOSRC_DIAG_PERIOD_MS) {
         autosrc_last_diag_ms = onekey_now_ms;
         GCS_SEND_TEXT(MAV_SEVERITY_INFO,
-                      "AS S%u st%u G%uN%u F%u P%u%u q%u r%ld h%.0f",
+                      "AS S%u st%u G%uN%u C%u F%u P%u%u q%u r%ld h%.0f",
                       unsigned(AP::ahrs().get_posvelyaw_source_set() + 1U),
                       unsigned(autosrc_state),
                       unsigned(autosrc_gps_raw_ready),
                       unsigned(autosrc_gps_nav_ready),
+                      unsigned(autosrc_gps_retry_ready),
                       unsigned(autosrc_flow_ground_ready || autosrc_flow_air_ready),
                       unsigned(autosrc_filter.flags.horiz_pos_abs),
                       unsigned(autosrc_filter.flags.horiz_pos_rel),
