@@ -19,8 +19,8 @@ required = [
     "#define AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS 15000U",
     "#define AUTOSRC_GPS_LOSS_HOLD_MS 2000U",
     "#define AUTOSRC_FLOW_MIN_QUALITY 50U",
-    "#define AUTOSRC_FLOW_GROUND_NAV_TIMEOUT_MS 5000U",
-    "#define AUTOSRC_FLOW_GROUND_RETRY_COOLDOWN_MS 10000U",
+    "#define AUTOSRC_FLOW_GROUND_NAV_TIMEOUT_MS 10000U",
+    "#define AUTOSRC_FLOW_GROUND_RETRY_COOLDOWN_MS 15000U",
     "#define AUTOSRC_FLOW_AIR_MAX_CM 250",
     "#define AUTOSRC_GPS_SWITCH_ALT_CM 150.0f",
     "#define AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS 60.0f",
@@ -136,6 +136,14 @@ if "OneKey TO denied: no position" in aux:
     raise SystemExit("AUX edge still hard-denies no-position instead of queueing")
 if "onekey_takeoff_state = OneKeyTakeoffState::WAIT_POSITION" not in aux:
     raise SystemExit("AUX HIGH does not queue WAIT_POSITION")
+
+
+for item in [
+    "OneKey TO abort: source/position lost before takeoff",
+    "OneKey TO abort: source/position lost during idle",
+]:
+    if item not in user:
+        raise SystemExit(f"OneKey launch no longer rechecks AutoSource readiness: {item}")
 
 
 # Manual Rudder arm and OneKey AUX arm must share the same final AutoSource gate.
