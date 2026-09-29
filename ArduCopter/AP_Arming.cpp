@@ -688,6 +688,28 @@ bool AP_Arming_Copter::arm(const AP_Arming::Method method, const bool do_arming_
         return true;
     }
 
+#if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
+    // Product flight contract: both rudder/manual arming and the RC8 OneKey
+    // AUX path must use Loiter and must pass the same AutoSource readiness
+    // gate. This is deliberately outside ARMING_CHECK so disabling optional
+    // checks cannot bypass the automatic Flow/GPS takeoff-source decision.
+    if ((method == AP_Arming::Method::RUDDER) ||
+        (method == AP_Arming::Method::AUXSWITCH)) {
+        if (copter.flightmode->mode_number() != Mode::Number::LOITER) {
+            check_failed(true, "AutoSrc requires Loiter");
+            AP_Notify::events.arming_failed = true;
+            in_arm_motors = false;
+            return false;
+        }
+        if (!copter.autosrc_takeoff_ready()) {
+            check_failed(true, "AutoSrc takeoff not ready");
+            AP_Notify::events.arming_failed = true;
+            in_arm_motors = false;
+            return false;
+        }
+    }
+#endif
+
     if (!AP_Arming::arm(method, do_arming_checks)) {
         AP_Notify::events.arming_failed = true;
         in_arm_motors = false;
