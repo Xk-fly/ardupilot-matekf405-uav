@@ -151,12 +151,14 @@ for item in [
     if item not in arming:
         raise SystemExit(f"manual/OneKey arming AutoSource gate missing: {item}")
 
-# This product gate is intentionally outside the optional ARMING_CHECK early
-# return so the normal manual/AUX paths cannot bypass source readiness.
-gate_i = arming.index("copter.autosrc_takeoff_ready()")
-checks_disabled_i = arming.index("if (checks_to_perform == 0)")
-if gate_i > checks_disabled_i:
-    raise SystemExit("AutoSource arm gate must run before optional arming checks can be skipped")
+# This product gate is intentionally in AP_Arming_Copter::arm(), before the
+# normal AP_Arming::arm() path, so optional ARMING_CHECK settings cannot bypass it.
+arm_fn_i = arming.index("bool AP_Arming_Copter::arm(")
+arm_fn = arming[arm_fn_i:arm_fn_i+5000]
+gate_i = arm_fn.index("copter.autosrc_takeoff_ready()")
+base_arm_i = arm_fn.index("if (!AP_Arming::arm(method, do_arming_checks))")
+if gate_i > base_arm_i:
+    raise SystemExit("AutoSource arm gate must run before AP_Arming::arm")
 
 # Existing safety chain and hardware-tested gimbal must remain intact.
 for item in [
