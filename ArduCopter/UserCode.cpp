@@ -651,6 +651,10 @@ void Copter::userhook_50Hz()
                 !autosrc_filter.flags.const_pos_mode;
             if (flow_nav_established) {
                 autosrc_last_flow_ground_nav_fail_ms = 0U;
+                // Keep this timestamp at the last known-good Flow navigation
+                // instant. A later transient loss must persist for the full
+                // timeout before GPS fallback is allowed.
+                autosrc_flow_ground_selected_ms = onekey_now_ms;
             } else if (autosrc_gps_raw_ready &&
                        (autosrc_flow_ground_selected_ms != 0U) &&
                        ((onekey_now_ms - autosrc_flow_ground_selected_ms) >=
