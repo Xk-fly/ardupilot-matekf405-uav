@@ -44,8 +44,8 @@
 #define AUTOSRC_FLOW_GROUND_MAX_CM 30
 #define AUTOSRC_FLOW_AIR_MAX_CM 250
 #define AUTOSRC_FLOW_READY_HOLD_MS 800U
-#define AUTOSRC_FLOW_GROUND_NAV_TIMEOUT_MS 5000U
-#define AUTOSRC_FLOW_GROUND_RETRY_COOLDOWN_MS 10000U
+#define AUTOSRC_FLOW_GROUND_NAV_TIMEOUT_MS 10000U
+#define AUTOSRC_FLOW_GROUND_RETRY_COOLDOWN_MS 15000U
 #define AUTOSRC_FLOW_LOSS_HOLD_MS 1200U
 #define AUTOSRC_GPS_SWITCH_ALT_CM 150.0f
 #define AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS 60.0f
@@ -860,12 +860,12 @@ void Copter::userhook_50Hz()
                 }
                 onekey_reset_takeoff_state();
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: RC lost before takeoff");
-            } else if (!position_ok()) {
+            } else if (!autosrc_takeoff_ready() || !position_ok()) {
                 if (ap.land_complete) {
                     (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
                 }
                 onekey_reset_takeoff_state();
-                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: position lost before takeoff");
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: source/position lost before takeoff");
             } else if (!ap.land_complete) {
                 onekey_reset_takeoff_state();
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO cancelled: no longer landed");
@@ -893,12 +893,12 @@ void Copter::userhook_50Hz()
             }
             onekey_reset_takeoff_state();
             GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: RC lost during idle");
-        } else if (!position_ok()) {
+        } else if (!autosrc_takeoff_ready() || !position_ok()) {
             if (ap.land_complete) {
                 (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
             }
             onekey_reset_takeoff_state();
-            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: position lost during idle");
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: source/position lost during idle");
         } else if (!ap.land_complete) {
             onekey_reset_takeoff_state();
             GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO cancelled: no longer landed");
