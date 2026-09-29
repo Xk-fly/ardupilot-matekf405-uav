@@ -557,9 +557,11 @@ void Copter::userhook_50Hz()
     const bool autosrc_flow_ground_now =
         autosrc_flow_sensor_ok &&
         autosrc_range_valid &&
-        // Do not impose a lower centimetre threshold here. The VL53 ground
+        // Do not impose the old 4 cm lower threshold here. The VL53 ground
         // bootstrap may report only ~2-3 cm after GNDCLEAR compensation even
-        // though the sample is valid. NoData is still rejected by range_valid.
+        // though the sample is valid. Reject only physically invalid negative
+        // values; NoData is still rejected by autosrc_range_valid.
+        (autosrc_range_cm >= 0) &&
         (autosrc_range_cm <= AUTOSRC_FLOW_GROUND_MAX_CM);
 
     const bool autosrc_flow_air_now =
