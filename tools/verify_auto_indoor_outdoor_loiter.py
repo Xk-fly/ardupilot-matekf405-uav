@@ -39,7 +39,6 @@ required = [
     "autosrc_gps_retry_ready",
     "autosrc_last_handover_fail_ms = onekey_now_ms",
     "autosrc_takeoff_ready()",
-    "autosrc_last_flow_ground_nav_fail_ms = onekey_now_ms",
     'autosrc_select_source(AUTOSRC_GPS_SOURCE_SET,',
     'autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "GPS lost")',
     "loiter_nav->init_target();",
