@@ -967,6 +967,7 @@ private:
 
     // UserCode.cpp
     void userhook_init();
+    bool autosrc_takeoff_ready();
     void userhook_FastLoop();
     void userhook_50Hz();
     void userhook_MediumLoop();
