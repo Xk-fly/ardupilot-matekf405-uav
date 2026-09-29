@@ -45,7 +45,6 @@
 #define AUTOSRC_FLOW_AIR_MAX_CM 250
 #define AUTOSRC_FLOW_READY_HOLD_MS 800U
 #define AUTOSRC_FLOW_GROUND_NAV_TIMEOUT_MS 10000U
-#define AUTOSRC_FLOW_GROUND_RETRY_COOLDOWN_MS 15000U
 #define AUTOSRC_FLOW_LOSS_HOLD_MS 1200U
 #define AUTOSRC_GPS_SWITCH_ALT_CM 150.0f
 #define AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS 60.0f
@@ -97,7 +96,7 @@ static uint32_t autosrc_flow_bad_since_ms = 0U;
 static uint32_t autosrc_transition_start_ms = 0U;
 static uint32_t autosrc_last_handover_fail_ms = 0U;
 static uint32_t autosrc_flow_ground_selected_ms = 0U;
-static uint32_t autosrc_last_flow_ground_nav_fail_ms = 0U;
+static bool autosrc_flow_ground_suppressed = false;
 static bool autosrc_gps_raw_ready_cached = false;
 static bool autosrc_gps_nav_ready_cached = false;
 static bool autosrc_flow_ground_ready_cached = false;
@@ -626,10 +625,13 @@ void Copter::userhook_50Hz()
         (autosrc_last_handover_fail_ms == 0U) ||
         ((onekey_now_ms - autosrc_last_handover_fail_ms) >=
          AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS);
-    const bool autosrc_flow_ground_retry_ready =
-        (autosrc_last_flow_ground_nav_fail_ms == 0U) ||
-        ((onekey_now_ms - autosrc_last_flow_ground_nav_fail_ms) >=
-         AUTOSRC_FLOW_GROUND_RETRY_COOLDOWN_MS);
+    // A failed Flow navigation acquisition is suppressed for the remainder
+    // of the current healthy-ground episode while GPS remains viable. This
+    // prevents periodic Flow/GPS source oscillation before takeoff. A real
+    // Flow/Range drop or loss of GPS viability permits a fresh Flow attempt.
+    if (!autosrc_flow_ground_now || !autosrc_gps_raw_ready) {
+        autosrc_flow_ground_suppressed = false;
+    }
 
     // On the ground, Flow is the preferred takeoff source whenever it is
     // healthy. If it is unavailable, a stable GPS solution is the fallback.
@@ -638,7 +640,7 @@ void Copter::userhook_50Hz()
         autosrc_gps_bad_since_ms = 0U;
         autosrc_flow_bad_since_ms = 0U;
 
-        if (autosrc_flow_ground_ready && autosrc_flow_ground_retry_ready) {
+        if (autosrc_flow_ground_ready && !autosrc_flow_ground_suppressed) {
             if (autosrc_active_set != AUTOSRC_FLOW_SOURCE_SET) {
                 autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "Flow takeoff");
                 autosrc_flow_ground_selected_ms = onekey_now_ms;
@@ -652,7 +654,7 @@ void Copter::userhook_50Hz()
                 !autosrc_filter.flags.horiz_pos_abs &&
                 !autosrc_filter.flags.const_pos_mode;
             if (flow_nav_established) {
-                autosrc_last_flow_ground_nav_fail_ms = 0U;
+                autosrc_flow_ground_suppressed = false;
                 // Keep this timestamp at the last known-good Flow navigation
                 // instant. A later transient loss must persist for the full
                 // timeout before GPS fallback is allowed.
@@ -665,7 +667,7 @@ void Copter::userhook_50Hz()
                 // but EKF relative aiding never becomes usable. Prefer GPS for
                 // this attempt, then allow Flow another try after cooldown.
                 autosrc_select_source(AUTOSRC_GPS_SOURCE_SET, "Flow nav timeout");
-                autosrc_last_flow_ground_nav_fail_ms = onekey_now_ms;
+                autosrc_flow_ground_suppressed = true;
                 autosrc_flow_ground_selected_ms = 0U;
                 autosrc_state = AutoSourceState::GPS_GROUND;
             }
