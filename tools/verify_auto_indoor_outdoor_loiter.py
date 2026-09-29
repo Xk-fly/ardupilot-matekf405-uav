@@ -62,9 +62,11 @@ if not (ground_i < flow_i < gps_i):
 # Ground bootstrap must accept valid near-zero compensated range samples.  NoData
 # is still rejected by autosrc_range_valid; only the old >=4 cm gate is removed.
 flow_ground_i = user.index("const bool autosrc_flow_ground_now")
-flow_ground_text = user[flow_ground_i:flow_ground_i+700]
-if "autosrc_range_valid" not in flow_ground_text or "AUTOSRC_FLOW_GROUND_MAX_CM" not in flow_ground_text:
-    raise SystemExit("Flow ground readiness lost valid/max-range checks")
+flow_air_i = user.index("const bool autosrc_flow_air_now", flow_ground_i)
+flow_ground_text = user[flow_ground_i:flow_air_i]
+for item in ["autosrc_range_valid", "autosrc_range_cm >= 0", "AUTOSRC_FLOW_GROUND_MAX_CM"]:
+    if item not in flow_ground_text:
+        raise SystemExit(f"Flow ground readiness lost sanity check: {item}")
 if "ONEKEY_LIFTOFF_ABORT_MAX_CM / 2.0f" in flow_ground_text:
     raise SystemExit("Flow ground readiness still contains the old 4 cm lower bound")
 
