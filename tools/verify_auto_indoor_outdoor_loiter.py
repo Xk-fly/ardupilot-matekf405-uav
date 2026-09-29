@@ -52,7 +52,7 @@ for item in required:
 
 # Low altitude normally starts on Flow; GPS is the fallback, not an unconditional boot choice.
 ground_i = user.index("if (!motors->armed() && ap.land_complete")
-flow_i = user.index("if (autosrc_flow_ground_ready && autosrc_flow_ground_retry_ready)", ground_i)
+flow_i = user.index("if (autosrc_flow_ground_ready && !autosrc_flow_ground_suppressed)", ground_i)
 gps_i = user.index("else if (autosrc_gps_raw_ready)", flow_i)
 if not (ground_i < flow_i < gps_i):
     raise SystemExit("ground source priority must remain Flow -> GPS fallback")
