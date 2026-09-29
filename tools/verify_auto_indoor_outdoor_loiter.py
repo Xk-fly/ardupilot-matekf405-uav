@@ -20,7 +20,6 @@ required = [
     "#define AUTOSRC_GPS_LOSS_HOLD_MS 2000U",
     "#define AUTOSRC_FLOW_MIN_QUALITY 50U",
     "#define AUTOSRC_FLOW_GROUND_NAV_TIMEOUT_MS 10000U",
-    "#define AUTOSRC_FLOW_GROUND_RETRY_COOLDOWN_MS 15000U",
     "#define AUTOSRC_FLOW_AIR_MAX_CM 250",
     "#define AUTOSRC_GPS_SWITCH_ALT_CM 150.0f",
     "#define AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS 60.0f",
@@ -71,15 +70,20 @@ if "ONEKEY_LIFTOFF_ABORT_MAX_CM / 2.0f" in flow_ground_text:
     raise SystemExit("Flow ground readiness still contains the old 4 cm lower bound")
 
 # If Flow sensor readiness exists but EKF relative aiding never establishes,
-# GPS must be able to take over after a bounded wait and Flow retry cooldown.
+# GPS must be able to take over after a bounded wait. Repeated automatic
+# Flow/GPS retry churn on the ground is suppressed until Flow actually drops
+# or GPS is no longer viable.
 for item in [
     "AUTOSRC_FLOW_GROUND_NAV_TIMEOUT_MS",
-    "AUTOSRC_FLOW_GROUND_RETRY_COOLDOWN_MS",
     '"Flow nav timeout"',
-    "autosrc_last_flow_ground_nav_fail_ms = onekey_now_ms",
+    "autosrc_flow_ground_suppressed = true",
+    "if (!autosrc_flow_ground_now || !autosrc_gps_raw_ready)",
+    "autosrc_flow_ground_ready && !autosrc_flow_ground_suppressed",
 ]:
     if item not in user:
         raise SystemExit(f"ground Flow navigation deadlock guard missing: {item}")
+if "AUTOSRC_FLOW_GROUND_RETRY_COOLDOWN_MS" in user:
+    raise SystemExit("timed ground Flow retry churn must remain disabled")
 
 # A failed normal handover must not immediately chatter back to GPS.
 if "AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS" not in user:
