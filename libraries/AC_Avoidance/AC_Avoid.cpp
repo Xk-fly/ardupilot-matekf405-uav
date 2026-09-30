@@ -126,6 +126,13 @@ AC_Avoid::AC_Avoid()
     AP_Param::setup_object_defaults(this, var_info);
 }
 
+void AC_Avoid::set_optflow_baro_height_limit(bool valid, float alt_diff_m)
+{
+    _optflow_baro_height_limit_valid = valid;
+    _optflow_baro_height_alt_diff_m = alt_diff_m;
+    _optflow_baro_height_limit_update_ms = AP_HAL::millis();
+}
+
 /*
 * This method limits velocity and calculates backaway velocity from various supported fences
 * Also limits vertical velocity using adjust_velocity_z method
@@ -401,17 +408,39 @@ void AC_Avoid::adjust_velocity_z(float kP, float accel_cmss, float& climb_rate_c
     }
 #endif
 
-    // calculate distance to (e.g.) optical flow altitude limit
-    // AHRS values are always in metres
-    float alt_limit;
-    float curr_alt;
-    if (_ahrs.get_hgt_ctrl_limit(alt_limit) &&
-        _ahrs.get_relative_position_D_origin(curr_alt)) {
-        // alt_limit is UP, curr_alt is DOWN:
-        const float ctrl_alt_diff = alt_limit + curr_alt;
+    // calculate distance to the optical-flow altitude limit.
+    //
+    // The product AutoSource manager can provide a barometer-relative
+    // distance-to-ceiling.  When that value is fresh it replaces only the
+    // native EKF optical-flow height limit; fence/proximity limits remain
+    // untouched.  If the producer stops updating, fall back to ArduPilot's
+    // native EKF limit instead of silently losing height protection.
+    static constexpr uint32_t OPTFLOW_BARO_HEIGHT_LIMIT_TIMEOUT_MS = 250U;
+    const bool optflow_baro_limit_fresh =
+        _optflow_baro_height_limit_valid &&
+        ((AP_HAL::millis() - _optflow_baro_height_limit_update_ms) <=
+         OPTFLOW_BARO_HEIGHT_LIMIT_TIMEOUT_MS);
+
+    if (optflow_baro_limit_fresh) {
+        const float ctrl_alt_diff = _optflow_baro_height_alt_diff_m;
         if (!limit_alt || ctrl_alt_diff < alt_diff) {
             alt_diff = ctrl_alt_diff;
             limit_alt = true;
+        }
+    } else {
+        // Native ArduPilot fallback: this path uses EKF relative origin Z.
+        // It is intentionally retained as a fail-safe only when the custom
+        // barometric limit is unavailable or stale.
+        float alt_limit;
+        float curr_alt;
+        if (_ahrs.get_hgt_ctrl_limit(alt_limit) &&
+            _ahrs.get_relative_position_D_origin(curr_alt)) {
+            // alt_limit is UP, curr_alt is DOWN:
+            const float ctrl_alt_diff = alt_limit + curr_alt;
+            if (!limit_alt || ctrl_alt_diff < alt_diff) {
+                alt_diff = ctrl_alt_diff;
+                limit_alt = true;
+            }
         }
     }
 
