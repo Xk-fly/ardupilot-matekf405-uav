@@ -701,7 +701,9 @@ void Mode::land_run_horizontal_control()
 
     // process pilot inputs
     if (!copter.failsafe.radio) {
-        if ((g.throttle_behavior & THR_BEHAVE_HIGH_THROTTLE_CANCELS_LAND) != 0 && copter.rc_throttle_control_in_filter.get() > LAND_CANCEL_TRIGGER_THR){
+        if (!copter.product_land_stick_locked() &&
+            (g.throttle_behavior & THR_BEHAVE_HIGH_THROTTLE_CANCELS_LAND) != 0 &&
+            copter.rc_throttle_control_in_filter.get() > LAND_CANCEL_TRIGGER_THR){
             LOGGER_WRITE_EVENT(LogEvent::LAND_CANCELLED_BY_PILOT);
             // exit land if throttle is high
             if (!set_mode(Mode::Number::LOITER, ModeReason::THROTTLE_LAND_ESCAPE)) {
@@ -709,7 +711,7 @@ void Mode::land_run_horizontal_control()
             }
         }
 
-        if (g.land_repositioning) {
+        if (g.land_repositioning && !copter.product_land_stick_locked()) {
             // apply SIMPLE mode transform to pilot inputs
             update_simple_mode();
 
@@ -816,7 +818,9 @@ void Mode::land_run_normal_or_precland(bool pause_descent)
 void Mode::precland_retry_position(const Vector3f &retry_pos)
 {
     if (!copter.failsafe.radio) {
-        if ((g.throttle_behavior & THR_BEHAVE_HIGH_THROTTLE_CANCELS_LAND) != 0 && copter.rc_throttle_control_in_filter.get() > LAND_CANCEL_TRIGGER_THR){
+        if (!copter.product_land_stick_locked() &&
+            (g.throttle_behavior & THR_BEHAVE_HIGH_THROTTLE_CANCELS_LAND) != 0 &&
+            copter.rc_throttle_control_in_filter.get() > LAND_CANCEL_TRIGGER_THR){
             LOGGER_WRITE_EVENT(LogEvent::LAND_CANCELLED_BY_PILOT);
             // exit land if throttle is high
             if (!set_mode(Mode::Number::LOITER, ModeReason::THROTTLE_LAND_ESCAPE)) {
@@ -826,7 +830,7 @@ void Mode::precland_retry_position(const Vector3f &retry_pos)
 
         // allow user to take control during repositioning. Note: copied from land_run_horizontal_control()
         // To-Do: this code exists at several different places in slightly different forms and that should be fixed
-        if (g.land_repositioning) {
+        if (g.land_repositioning && !copter.product_land_stick_locked()) {
             float target_roll = 0.0f;
             float target_pitch = 0.0f;
             // convert pilot input to lean angles
