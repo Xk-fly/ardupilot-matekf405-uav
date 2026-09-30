@@ -71,6 +71,12 @@ public:
             climb_rate_cms = MIN(climb_rate_cms, backup_speed);
         }
     }
+
+    // Optional external replacement for the EKF optical-flow height limit.
+    // alt_diff_m is positive below the ceiling and <=0 at/above the ceiling.
+    // A short freshness timeout in AC_Avoid.cpp makes this fail-safe back to
+    // the native EKF limit if the producer stops updating.
+    void set_optflow_baro_height_limit(bool valid, float alt_diff_m);
     
 
     // adjust roll-pitch to push vehicle away from objects
@@ -222,6 +228,10 @@ private:
     uint32_t _last_limit_time;      // the last time a limit was active
     uint32_t _last_log_ms;          // the last time simple avoidance was logged
     Vector3f _prev_avoid_vel;       // copy of avoidance adjusted velocity
+
+    bool _optflow_baro_height_limit_valid = false;
+    float _optflow_baro_height_alt_diff_m = 0.0f;
+    uint32_t _optflow_baro_height_limit_update_ms = 0U;
 
     static AC_Avoid *_singleton;
 };
