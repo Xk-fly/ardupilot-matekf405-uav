@@ -120,6 +120,10 @@ void ModeLoiter::run()
     // Loiter State Machine Determination
     AltHoldModeState loiter_state = get_alt_hold_state(target_climb_rate);
 
+    if (loiter_state != AltHold_Flying) {
+        copter.low_alt_landing_guard_reset();
+    }
+
     // Loiter State Machine
     switch (loiter_state) {
 
@@ -187,6 +191,14 @@ void ModeLoiter::run()
 
         // call attitude controller
         attitude_control->input_thrust_vector_rate_heading(loiter_nav->get_thrust_vector(), target_yaw_rate, false);
+
+        // Low-altitude rangefinder floor. This can clamp only a
+        // downward pilot command, or switch to native LAND after deliberate
+        // minimum-throttle confirmation. If mode changes, stop this Loiter
+        // iteration immediately and let LAND own the next control cycle.
+        if (copter.low_alt_landing_guard(target_climb_rate)) {
+            return;
+        }
 
         // get avoidance adjusted climb rate
         target_climb_rate = get_avoidance_adjusted_climbrate(target_climb_rate);
