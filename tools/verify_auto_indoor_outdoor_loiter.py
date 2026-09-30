@@ -21,7 +21,9 @@ required = [
     "#define AUTOSRC_FLOW_MIN_QUALITY 50U",
     "#define AUTOSRC_FLOW_GROUND_NAV_TIMEOUT_MS 10000U",
     "#define AUTOSRC_FLOW_AIR_MAX_CM 250",
-    "#define AUTOSRC_GPS_SWITCH_ALT_CM 150.0f",
+    "#define AUTOSRC_BARO_GROUND_SETTLE_MS 1000U",
+    "#define AUTOSRC_GPS_SWITCH_BARO_CM 160.0f",
+    "#define AUTOSRC_GPS_SWITCH_BARO_HOLD_MS 1000U",
     "#define AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS 60.0f",
     "AutoSourceState::GPS_HANDOVER",
     "AutoSourceState::FLOW_RECOVERY",
@@ -34,7 +36,7 @@ required = [
     "autosrc_filter.flags.horiz_pos_abs",
     "autosrc_filter.flags.using_gps",
     "!autosrc_filter.flags.gps_glitching",
-    "autosrc_alt_cm >= AUTOSRC_GPS_SWITCH_ALT_CM",
+    "autosrc_baro_switch_ready",
     "autosrc_xy_speed_cms <= AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS",
     "autosrc_gps_retry_ready",
     "autosrc_last_handover_fail_ms = onekey_now_ms",
@@ -44,7 +46,7 @@ required = [
     "loiter_nav->init_target();",
     "AutoSrc GPS handover complete",
     "AutoSrc Flow recovery complete",
-    "AS S%u st%u G%uN%u C%u F%u T%u P%u%u q%u r%ld h%.0f",
+    "AS S%u st%u G%uN%u C%u F%u T%u P%u%u q%u r%ld b%.0f",
 ]
 for item in required:
     if item not in user:
@@ -90,13 +92,27 @@ if "AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS" not in user:
 if "autosrc_last_handover_fail_ms = onekey_now_ms" not in user:
     raise SystemExit("GPS handover timeout does not arm retry cooldown")
 
-# Normal handover must be gated by GPS stability, altitude, low XY speed and Loiter.
+# Normal handover must use a dedicated relative barometric height, not EKF local Z.
+for item in [
+    "barometer.healthy()",
+    "float(baro_alt) - autosrc_baro_ground_ref_cm",
+    "AUTOSRC_BARO_GROUND_TRACK_ALPHA",
+    "AUTOSRC_BARO_GROUND_SETTLE_MS",
+    "AUTOSRC_GPS_SWITCH_BARO_CM",
+    "AUTOSRC_GPS_SWITCH_BARO_HOLD_MS",
+    "autosrc_baro_switch_ready",
+]:
+    if item not in user:
+        raise SystemExit(f"relative baro handover contract missing: {item}")
+if "const float autosrc_alt_cm = inertial_nav.get_position_z_up_cm();" in user:
+    raise SystemExit("source manager must not use EKF local Z as handover altitude")
+
 gate_i = user.index("const bool normal_gps_gate")
 gate_text = user[gate_i:gate_i+900]
 for item in [
     "autosrc_gps_raw_ready",
     "autosrc_gps_retry_ready",
-    "autosrc_alt_cm >= AUTOSRC_GPS_SWITCH_ALT_CM",
+    "autosrc_baro_switch_ready",
     "autosrc_xy_speed_cms <= AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS",
     "flightmode == &mode_loiter",
 ]:
@@ -109,11 +125,15 @@ fallback_text = user[max(0,fallback_i-1000):fallback_i+400]
 for item in [
     "gps_failed",
     "autosrc_flow_air_ready",
-    "AUTOSRC_FLOW_AIR_MAX_CM",
     "flightmode == &mode_loiter",
 ]:
     if item not in fallback_text:
         raise SystemExit(f"GPS emergency fallback guard missing: {item}")
+
+# Rollback/emergency GPS->Flow paths must use actual Flow+range readiness,
+# never the broken EKF local-Z altitude. This does not add normal healthy GPS->Flow.
+if "autosrc_alt_cm <= float(AUTOSRC_FLOW_AIR_MAX_CM)" in user:
+    raise SystemExit("Flow fallback still depends on EKF local-Z altitude")
 
 # Flow-loss emergency GPS acquisition is intentionally allowed to bypass the
 # normal retry cooldown because it may be the only remaining horizontal aid.
