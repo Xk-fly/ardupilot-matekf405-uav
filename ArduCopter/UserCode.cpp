@@ -268,8 +268,9 @@ bool Copter::low_alt_landing_guard(float &target_climb_rate)
     }
 
     const bool hard_stop_active =
-        (lowalt_hard_stop_until_ms != 0U) &&
-        (int32_t(lowalt_hard_stop_until_ms - now_ms) > 0);
+        (range_fresh && (range_cm <= LOWALT_HARD_MIN_CM)) ||
+        ((lowalt_hard_stop_until_ms != 0U) &&
+         (int32_t(lowalt_hard_stop_until_ms - now_ms) > 0));
     const bool floor_active =
         (lowalt_landing_state == LowAltLandingState::HOLD);
 
