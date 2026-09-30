@@ -678,7 +678,7 @@ void Copter::userhook_50Hz()
     // Fence and proximity vertical limits remain active inside AC_Avoid.
     // If this 50 Hz producer becomes stale or the baro reference is invalid,
     // AC_Avoid automatically falls back to the native EKF height protection.
-    if (AC_Avoid *avoid = AP::ac_avoid()) {
+    if (AC_Avoid *avoid_ref = AP::ac_avoid()) {
         const bool flow_baro_ceiling_valid =
             motors->armed() &&
             ((autosrc_active_set == AUTOSRC_FLOW_SOURCE_SET) ||
@@ -687,8 +687,8 @@ void Copter::userhook_50Hz()
             autosrc_baro_healthy;
         const float flow_baro_ceiling_diff_m =
             (AUTOSRC_FLOW_MAX_BARO_CM - autosrc_baro_rel_cm) * 0.01f;
-        avoid->set_optflow_baro_height_limit(flow_baro_ceiling_valid,
-                                             flow_baro_ceiling_diff_m);
+        avoid_ref->set_optflow_baro_height_limit(flow_baro_ceiling_valid,
+                                                 flow_baro_ceiling_diff_m);
     }
 #endif
 
