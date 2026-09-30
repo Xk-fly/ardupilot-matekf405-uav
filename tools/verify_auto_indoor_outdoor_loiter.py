@@ -119,6 +119,7 @@ for item in [
     "autosrc_baro_healthy",
     "(AUTOSRC_FLOW_MAX_BARO_CM - autosrc_baro_rel_cm) * 0.01f",
     "set_optflow_baro_height_limit(flow_baro_ceiling_valid",
+    "autosrc_state == AutoSourceState::GPS_HANDOVER",
 ]:
     if item not in user:
         raise SystemExit(f"baro Flow ceiling producer missing: {item}")
@@ -136,6 +137,7 @@ for item in [
     "OPTFLOW_BARO_HEIGHT_LIMIT_TIMEOUT_MS = 250U",
     "optflow_baro_limit_fresh",
     "_optflow_baro_height_alt_diff_m",
+    "(_enabled == AC_AVOID_DISABLED) && !optflow_baro_limit_fresh",
     "_ahrs.get_hgt_ctrl_limit(alt_limit)",
     "_ahrs.get_relative_position_D_origin(curr_alt)",
 ]:
