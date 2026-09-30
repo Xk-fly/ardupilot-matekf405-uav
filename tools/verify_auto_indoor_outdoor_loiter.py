@@ -7,6 +7,9 @@ arming = (root / "ArduCopter/AP_Arming.cpp").read_text(encoding="utf-8")
 copter_h = (root / "ArduCopter/Copter.h").read_text(encoding="utf-8")
 avoid_cpp = (root / "libraries/AC_Avoidance/AC_Avoid.cpp").read_text(encoding="utf-8")
 avoid_h = (root / "libraries/AC_Avoidance/AC_Avoid.h").read_text(encoding="utf-8")
+loiter = (root / "ArduCopter/mode_loiter.cpp").read_text(encoding="utf-8")
+mode_cpp = (root / "ArduCopter/mode.cpp").read_text(encoding="utf-8")
+land_cpp = (root / "ArduCopter/mode_land.cpp").read_text(encoding="utf-8")
 config = (root / "ArduCopter/APM_Config.h").read_text(encoding="utf-8")
 
 required = [
@@ -243,6 +246,69 @@ gate_i = arm_fn.index("copter.autosrc_takeoff_ready()")
 base_arm_i = arm_fn.index("if (!AP_Arming::arm(method, do_arming_checks))")
 if gate_i > base_arm_i:
     raise SystemExit("AutoSource arm gate must run before AP_Arming::arm")
+
+# Low-altitude throttle landing contract.
+for item in [
+    "#define LOWALT_FLOOR_ENTER_CM 40",
+    "#define LOWALT_HARD_MIN_CM 30",
+    "#define LOWALT_FLOOR_RELEASE_CM 50",
+    "#define LOWALT_RANGE_CONFIRM_MS 200U",
+    "#define LOWALT_HARD_STOP_HOLD_MS 250U",
+    "#define LOWALT_THROTTLE_MIN_CONTROL 50",
+    "#define LOWALT_THROTTLE_LAND_HOLD_MS 1000U",
+    "#define LOWALT_LAND_MAX_XY_SPEED_CMS 50.0f",
+    "#define LOWALT_RANGE_FRESH_MS 350U",
+    "rangefinder_state.alt_cm",
+    "rangefinder_state.last_healthy_ms",
+    "rangefinder_alt_ok()",
+    "lowalt_landing_state = LowAltLandingState::HOLD",
+    "range_cm > LOWALT_FLOOR_RELEASE_CM",
+    "(range_fresh && (range_cm <= LOWALT_HARD_MIN_CM))",
+    "if ((floor_active || hard_stop_active) && (target_climb_rate < 0.0f))",
+    "target_climb_rate = 0.0f",
+    "range_cm <= LOWALT_FLOOR_RELEASE_CM",
+    "channel_throttle->get_control_in() <= LOWALT_THROTTLE_MIN_CONTROL",
+    "LOWALT_LAND_MAX_XY_SPEED_CMS",
+    "LOWALT_THROTTLE_LAND_HOLD_MS",
+    "set_mode(Mode::Number::LAND, ModeReason::RC_COMMAND)",
+    "LowAlt throttle LAND started",
+]:
+    if item not in user:
+        raise SystemExit(f"low-alt throttle LAND contract missing: {item}")
+
+# LAND confirmation must require a current valid low-alt range. A latched floor
+# may survive NoData, but NoData must never be enough to start LAND.
+land_height_i = user.index("const bool land_height_confirmed")
+land_height_text = user[land_height_i:land_height_i+450]
+for item in ["range_fresh", "range_cm >= 0", "range_cm <= LOWALT_FLOOR_RELEASE_CM"]:
+    if item not in land_height_text:
+        raise SystemExit(f"low-alt LAND current-range gate missing: {item}")
+
+# The floor is applied only in Loiter's normal Flying state. Takeoff/ground
+# states reset it so OneKey takeoff cannot be mistaken for a landing request.
+for item in [
+    "if (loiter_state != AltHold_Flying)",
+    "copter.low_alt_landing_guard_reset();",
+    "if (copter.low_alt_landing_guard(target_climb_rate))",
+]:
+    if item not in loiter:
+        raise SystemExit(f"Loiter low-alt integration missing: {item}")
+flying_i = loiter.index("case AltHold_Flying:")
+guard_i = loiter.index("copter.low_alt_landing_guard(target_climb_rate)", flying_i)
+if guard_i < flying_i:
+    raise SystemExit("low-alt landing guard must run only in AltHold_Flying")
+
+# Product-triggered LAND (low-alt throttle or RC8) locks pilot reposition and
+# high-throttle escape, while non-product LAND retains native parameter logic.
+if "product_land_stick_lock = true" not in user:
+    raise SystemExit("product LAND stick lock is never armed")
+if "product_land_stick_lock = false" not in user:
+    raise SystemExit("product LAND stick lock is never cleared")
+for source_name, source in [("mode.cpp", mode_cpp), ("mode_land.cpp", land_cpp)]:
+    if "!copter.product_land_stick_locked()" not in source:
+        raise SystemExit(f"{source_name} does not respect product LAND stick lock")
+    if "g.land_repositioning && !copter.product_land_stick_locked()" not in source:
+        raise SystemExit(f"{source_name} still permits product LAND repositioning")
 
 # Existing safety chain and hardware-tested gimbal must remain intact.
 for item in [
