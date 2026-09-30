@@ -101,13 +101,15 @@ void ModeLand::nogps_run()
 
     // process pilot inputs
     if (!copter.failsafe.radio) {
-        if ((g.throttle_behavior & THR_BEHAVE_HIGH_THROTTLE_CANCELS_LAND) != 0 && copter.rc_throttle_control_in_filter.get() > LAND_CANCEL_TRIGGER_THR){
+        if (!copter.product_land_stick_locked() &&
+            (g.throttle_behavior & THR_BEHAVE_HIGH_THROTTLE_CANCELS_LAND) != 0 &&
+            copter.rc_throttle_control_in_filter.get() > LAND_CANCEL_TRIGGER_THR){
             LOGGER_WRITE_EVENT(LogEvent::LAND_CANCELLED_BY_PILOT);
             // exit land if throttle is high
             copter.set_mode(Mode::Number::ALT_HOLD, ModeReason::THROTTLE_LAND_ESCAPE);
         }
 
-        if (g.land_repositioning) {
+        if (g.land_repositioning && !copter.product_land_stick_locked()) {
             // apply SIMPLE mode transform to pilot inputs
             update_simple_mode();
 
