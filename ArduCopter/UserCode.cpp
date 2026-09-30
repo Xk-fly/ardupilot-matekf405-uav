@@ -46,7 +46,10 @@
 #define AUTOSRC_FLOW_READY_HOLD_MS 800U
 #define AUTOSRC_FLOW_GROUND_NAV_TIMEOUT_MS 10000U
 #define AUTOSRC_FLOW_LOSS_HOLD_MS 1200U
-#define AUTOSRC_GPS_SWITCH_ALT_CM 150.0f
+#define AUTOSRC_BARO_GROUND_SETTLE_MS 1000U
+#define AUTOSRC_BARO_GROUND_TRACK_ALPHA 0.05f
+#define AUTOSRC_GPS_SWITCH_BARO_CM 160.0f
+#define AUTOSRC_GPS_SWITCH_BARO_HOLD_MS 1000U
 #define AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS 60.0f
 #define AUTOSRC_DIAG_PERIOD_MS 5000U
 #define AUTOSRC_BOOT_SETTLE_MS 1500U
@@ -97,6 +100,10 @@ static uint32_t autosrc_transition_start_ms = 0U;
 static uint32_t autosrc_last_handover_fail_ms = 0U;
 static uint32_t autosrc_flow_ground_selected_ms = 0U;
 static bool autosrc_flow_ground_suppressed = false;
+static float autosrc_baro_ground_ref_cm = 0.0f;
+static bool autosrc_baro_ground_ref_valid = false;
+static uint32_t autosrc_baro_ground_track_since_ms = 0U;
+static uint32_t autosrc_baro_switch_since_ms = 0U;
 static bool autosrc_gps_raw_ready_cached = false;
 static bool autosrc_gps_nav_ready_cached = false;
 static bool autosrc_flow_ground_ready_cached = false;
@@ -601,6 +608,50 @@ void Copter::userhook_50Hz()
     update_hold(autosrc_flow_ground_now, autosrc_flow_ground_since_ms);
     update_hold(autosrc_flow_air_now, autosrc_flow_air_since_ms);
 
+    // Track a dedicated barometric ground reference only while disarmed and
+    // landed. Once armed, the reference is frozen for the entire flight. This
+    // deliberately avoids EKF local-Z origin resets when deciding when the
+    // low-altitude Flow phase should hand over to GPS.
+    const bool autosrc_baro_healthy = barometer.healthy() && isfinite(baro_alt);
+    if (!motors->armed() && ap.land_complete) {
+        if (autosrc_baro_healthy) {
+            if (autosrc_baro_ground_track_since_ms == 0U) {
+                autosrc_baro_ground_track_since_ms = onekey_now_ms;
+                autosrc_baro_ground_ref_cm = float(baro_alt);
+                autosrc_baro_ground_ref_valid = false;
+            } else {
+                autosrc_baro_ground_ref_cm +=
+                    AUTOSRC_BARO_GROUND_TRACK_ALPHA *
+                    (float(baro_alt) - autosrc_baro_ground_ref_cm);
+                if ((onekey_now_ms - autosrc_baro_ground_track_since_ms) >=
+                    AUTOSRC_BARO_GROUND_SETTLE_MS) {
+                    autosrc_baro_ground_ref_valid = true;
+                }
+            }
+        } else {
+            autosrc_baro_ground_track_since_ms = 0U;
+            autosrc_baro_ground_ref_valid = false;
+        }
+        autosrc_baro_switch_since_ms = 0U;
+    } else if (motors->armed()) {
+        // Force a fresh one-second ground reference after the next disarm.
+        autosrc_baro_ground_track_since_ms = 0U;
+    }
+
+    const float autosrc_baro_rel_cm =
+        autosrc_baro_ground_ref_valid ?
+            (float(baro_alt) - autosrc_baro_ground_ref_cm) : 0.0f;
+    const bool autosrc_baro_switch_now =
+        motors->armed() &&
+        autosrc_baro_ground_ref_valid &&
+        autosrc_baro_healthy &&
+        (autosrc_baro_rel_cm >= AUTOSRC_GPS_SWITCH_BARO_CM);
+    update_hold(autosrc_baro_switch_now, autosrc_baro_switch_since_ms);
+    const bool autosrc_baro_switch_ready =
+        (autosrc_baro_switch_since_ms != 0U) &&
+        ((onekey_now_ms - autosrc_baro_switch_since_ms) >=
+         AUTOSRC_GPS_SWITCH_BARO_HOLD_MS);
+
     const bool autosrc_gps_raw_ready =
         (autosrc_gps_raw_since_ms != 0U) &&
         ((onekey_now_ms - autosrc_gps_raw_since_ms) >= AUTOSRC_GPS_RAW_HOLD_MS);
@@ -619,7 +670,6 @@ void Copter::userhook_50Hz()
     autosrc_flow_ground_ready_cached = autosrc_flow_ground_ready;
 
     const uint8_t autosrc_active_set = AP::ahrs().get_posvelyaw_source_set();
-    const float autosrc_alt_cm = inertial_nav.get_position_z_up_cm();
     const float autosrc_xy_speed_cms = inertial_nav.get_velocity_xy_cms().length();
     const bool autosrc_gps_retry_ready =
         (autosrc_last_handover_fail_ms == 0U) ||
@@ -700,7 +750,7 @@ void Copter::userhook_50Hz()
             const bool normal_gps_gate =
                 autosrc_gps_raw_ready &&
                 autosrc_gps_retry_ready &&
-                (autosrc_alt_cm >= AUTOSRC_GPS_SWITCH_ALT_CM) &&
+                autosrc_baro_switch_ready &&
                 (autosrc_xy_speed_cms <= AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS) &&
                 (flightmode == &mode_loiter);
 
@@ -730,8 +780,7 @@ void Copter::userhook_50Hz()
                 GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AutoSrc GPS handover complete");
             } else if ((onekey_now_ms - autosrc_transition_start_ms) >=
                        AUTOSRC_GPS_HANDOVER_TIMEOUT_MS) {
-                if (autosrc_flow_air_ready &&
-                    (autosrc_alt_cm <= float(AUTOSRC_FLOW_AIR_MAX_CM))) {
+                if (autosrc_flow_air_ready) {
                     autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "GPS handover timeout");
                     autosrc_transition_start_ms = onekey_now_ms;
                     autosrc_last_handover_fail_ms = onekey_now_ms;
@@ -764,7 +813,6 @@ void Copter::userhook_50Hz()
 
             if (gps_failed &&
                 autosrc_flow_air_ready &&
-                (autosrc_alt_cm <= float(AUTOSRC_FLOW_AIR_MAX_CM)) &&
                 (flightmode == &mode_loiter)) {
                 autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "GPS lost");
                 autosrc_transition_start_ms = onekey_now_ms;
@@ -792,7 +840,7 @@ void Copter::userhook_50Hz()
     if ((onekey_now_ms - autosrc_last_diag_ms) >= AUTOSRC_DIAG_PERIOD_MS) {
         autosrc_last_diag_ms = onekey_now_ms;
         GCS_SEND_TEXT(MAV_SEVERITY_INFO,
-                      "AS S%u st%u G%uN%u C%u F%u T%u P%u%u q%u r%ld h%.0f",
+                      "AS S%u st%u G%uN%u C%u F%u T%u P%u%u q%u r%ld b%.0f",
                       unsigned(AP::ahrs().get_posvelyaw_source_set() + 1U),
                       unsigned(autosrc_state),
                       unsigned(autosrc_gps_raw_ready),
@@ -804,7 +852,7 @@ void Copter::userhook_50Hz()
                       unsigned(autosrc_filter.flags.horiz_pos_rel),
                       unsigned(optflow.quality()),
                       long(autosrc_range_valid ? autosrc_range_cm : -1),
-                      double(autosrc_alt_cm));
+                      double(autosrc_baro_ground_ref_valid ? autosrc_baro_rel_cm : -999.0f));
     }
 #endif
 
