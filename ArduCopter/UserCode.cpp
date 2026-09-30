@@ -681,7 +681,8 @@ void Copter::userhook_50Hz()
     if (AC_Avoid *avoid = AP::ac_avoid()) {
         const bool flow_baro_ceiling_valid =
             motors->armed() &&
-            (autosrc_active_set == AUTOSRC_FLOW_SOURCE_SET) &&
+            ((autosrc_active_set == AUTOSRC_FLOW_SOURCE_SET) ||
+             (autosrc_state == AutoSourceState::GPS_HANDOVER)) &&
             autosrc_baro_ground_ref_valid &&
             autosrc_baro_healthy;
         const float flow_baro_ceiling_diff_m =
