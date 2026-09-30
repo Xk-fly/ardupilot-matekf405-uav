@@ -377,8 +377,16 @@ void AC_Avoid::adjust_velocity_z(float kP, float accel_cmss, float& climb_rate_c
 {
 #ifdef AP_AVOID_ENABLE_Z
 
-    // exit immediately if disabled
-    if (_enabled == AC_AVOID_DISABLED) {
+    static constexpr uint32_t OPTFLOW_BARO_HEIGHT_LIMIT_TIMEOUT_MS = 250U;
+    const bool optflow_baro_limit_fresh =
+        _optflow_baro_height_limit_valid &&
+        ((AP_HAL::millis() - _optflow_baro_height_limit_update_ms) <=
+         OPTFLOW_BARO_HEIGHT_LIMIT_TIMEOUT_MS);
+
+    // The product Flow ceiling is a safety limit of its own and remains active
+    // even if the user disables the general fence/proximity avoidance system.
+    // If no fresh product ceiling exists, preserve the native early return.
+    if ((_enabled == AC_AVOID_DISABLED) && !optflow_baro_limit_fresh) {
         return;
     }
     
@@ -415,12 +423,6 @@ void AC_Avoid::adjust_velocity_z(float kP, float accel_cmss, float& climb_rate_c
     // native EKF optical-flow height limit; fence/proximity limits remain
     // untouched.  If the producer stops updating, fall back to ArduPilot's
     // native EKF limit instead of silently losing height protection.
-    static constexpr uint32_t OPTFLOW_BARO_HEIGHT_LIMIT_TIMEOUT_MS = 250U;
-    const bool optflow_baro_limit_fresh =
-        _optflow_baro_height_limit_valid &&
-        ((AP_HAL::millis() - _optflow_baro_height_limit_update_ms) <=
-         OPTFLOW_BARO_HEIGHT_LIMIT_TIMEOUT_MS);
-
     if (optflow_baro_limit_fresh) {
         const float ctrl_alt_diff = _optflow_baro_height_alt_diff_m;
         if (!limit_alt || ctrl_alt_diff < alt_diff) {
