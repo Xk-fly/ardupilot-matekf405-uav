@@ -612,7 +612,7 @@ void Copter::userhook_50Hz()
     // landed. Once armed, the reference is frozen for the entire flight. This
     // deliberately avoids EKF local-Z origin resets when deciding when the
     // low-altitude Flow phase should hand over to GPS.
-    const bool autosrc_baro_healthy = barometer.healthy() && isfinite(baro_alt);
+    const bool autosrc_baro_healthy = barometer.healthy();
     if (!motors->armed() && ap.land_complete) {
         if (autosrc_baro_healthy) {
             if (autosrc_baro_ground_track_since_ms == 0U) {
