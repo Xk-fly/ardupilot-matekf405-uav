@@ -5,6 +5,8 @@ root = Path(__file__).resolve().parents[1]
 user = (root / "ArduCopter/UserCode.cpp").read_text(encoding="utf-8")
 arming = (root / "ArduCopter/AP_Arming.cpp").read_text(encoding="utf-8")
 copter_h = (root / "ArduCopter/Copter.h").read_text(encoding="utf-8")
+avoid_cpp = (root / "libraries/AC_Avoidance/AC_Avoid.cpp").read_text(encoding="utf-8")
+avoid_h = (root / "libraries/AC_Avoidance/AC_Avoid.h").read_text(encoding="utf-8")
 config = (root / "ArduCopter/APM_Config.h").read_text(encoding="utf-8")
 
 required = [
@@ -24,6 +26,7 @@ required = [
     "#define AUTOSRC_BARO_GROUND_SETTLE_MS 1000U",
     "#define AUTOSRC_GPS_SWITCH_BARO_CM 160.0f",
     "#define AUTOSRC_GPS_SWITCH_BARO_HOLD_MS 1000U",
+    "#define AUTOSRC_FLOW_MAX_BARO_CM 230.0f",
     "#define AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS 60.0f",
     "AutoSourceState::GPS_HANDOVER",
     "AutoSourceState::FLOW_RECOVERY",
@@ -106,6 +109,52 @@ for item in [
         raise SystemExit(f"relative baro handover contract missing: {item}")
 if "const float autosrc_alt_cm = inertial_nav.get_position_z_up_cm();" in user:
     raise SystemExit("source manager must not use EKF local Z as handover altitude")
+
+# The optical-flow flight ceiling must use exactly the same frozen barometric
+# ground reference as the AutoSource handover. It replaces only the native
+# EKF Flow height wall; fence/proximity limits must remain available.
+for item in [
+    "AUTOSRC_FLOW_MAX_BARO_CM",
+    "autosrc_baro_ground_ref_valid",
+    "autosrc_baro_healthy",
+    "(AUTOSRC_FLOW_MAX_BARO_CM - autosrc_baro_rel_cm) * 0.01f",
+    "set_optflow_baro_height_limit(flow_baro_ceiling_valid",
+]:
+    if item not in user:
+        raise SystemExit(f"baro Flow ceiling producer missing: {item}")
+
+for item in [
+    "void set_optflow_baro_height_limit(bool valid, float alt_diff_m);",
+    "_optflow_baro_height_limit_valid",
+    "_optflow_baro_height_alt_diff_m",
+    "_optflow_baro_height_limit_update_ms",
+]:
+    if item not in avoid_h:
+        raise SystemExit(f"baro Flow ceiling interface missing: {item}")
+
+for item in [
+    "OPTFLOW_BARO_HEIGHT_LIMIT_TIMEOUT_MS = 250U",
+    "optflow_baro_limit_fresh",
+    "_optflow_baro_height_alt_diff_m",
+    "_ahrs.get_hgt_ctrl_limit(alt_limit)",
+    "_ahrs.get_relative_position_D_origin(curr_alt)",
+]:
+    if item not in avoid_cpp:
+        raise SystemExit(f"baro Flow ceiling/fallback contract missing: {item}")
+
+external_i = avoid_cpp.index("if (optflow_baro_limit_fresh)")
+native_i = avoid_cpp.index("_ahrs.get_hgt_ctrl_limit(alt_limit)", external_i)
+if external_i > native_i:
+    raise SystemExit("fresh baro Flow ceiling must take precedence over native EKF height limit")
+
+# Do not solve the Flow ceiling by disabling the whole avoidance chain.
+for item in [
+    "AC_AVOID_STOP_AT_FENCE",
+    "proximity_avoidance_enabled()",
+    "get_upward_distance(proximity_alt_diff)",
+]:
+    if item not in avoid_cpp:
+        raise SystemExit(f"fence/proximity vertical protection regressed: {item}")
 
 gate_i = user.index("const bool normal_gps_gate")
 gate_text = user[gate_i:gate_i+900]
