@@ -50,6 +50,7 @@
 #define AUTOSRC_BARO_GROUND_TRACK_ALPHA 0.05f
 #define AUTOSRC_GPS_SWITCH_BARO_CM 160.0f
 #define AUTOSRC_GPS_SWITCH_BARO_HOLD_MS 1000U
+#define AUTOSRC_FLOW_MAX_BARO_CM 230.0f
 #define AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS 60.0f
 #define AUTOSRC_DIAG_PERIOD_MS 5000U
 #define AUTOSRC_BOOT_SETTLE_MS 1500U
@@ -670,6 +671,26 @@ void Copter::userhook_50Hz()
     autosrc_flow_ground_ready_cached = autosrc_flow_ground_ready;
 
     const uint8_t autosrc_active_set = AP::ahrs().get_posvelyaw_source_set();
+
+#if AC_AVOID_ENABLED == ENABLED
+    // Replace only ArduPilot's native optical-flow height wall with the same
+    // barometer-relative height reference used by the AutoSource manager.
+    // Fence and proximity vertical limits remain active inside AC_Avoid.
+    // If this 50 Hz producer becomes stale or the baro reference is invalid,
+    // AC_Avoid automatically falls back to the native EKF height protection.
+    if (AC_Avoid *avoid = AP::ac_avoid()) {
+        const bool flow_baro_ceiling_valid =
+            motors->armed() &&
+            (autosrc_active_set == AUTOSRC_FLOW_SOURCE_SET) &&
+            autosrc_baro_ground_ref_valid &&
+            autosrc_baro_healthy;
+        const float flow_baro_ceiling_diff_m =
+            (AUTOSRC_FLOW_MAX_BARO_CM - autosrc_baro_rel_cm) * 0.01f;
+        avoid->set_optflow_baro_height_limit(flow_baro_ceiling_valid,
+                                             flow_baro_ceiling_diff_m);
+    }
+#endif
+
     const float autosrc_xy_speed_cms = inertial_nav.get_velocity_xy_cms().length();
     const bool autosrc_gps_retry_ready =
         (autosrc_last_handover_fail_ms == 0U) ||
