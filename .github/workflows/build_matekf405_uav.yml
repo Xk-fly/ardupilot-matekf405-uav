@@ -7,6 +7,7 @@ on:
       - feature/one-key-takeoff-land
       - feature/rc8-onekey-rc7-gimbal
       - feature/auto-indoor-outdoor-loiter
+      - feature/bidirectional-auto-flow-gps
   workflow_dispatch:
 
 permissions:
@@ -46,7 +47,7 @@ jobs:
           python3 tools/verify_rc8_onekey_rc7_gimbal.py
 
       - name: Verify automatic indoor/outdoor source integration
-        if: github.ref_name == 'feature/auto-indoor-outdoor-loiter'
+        if: github.ref_name == 'feature/auto-indoor-outdoor-loiter' || github.ref_name == 'feature/bidirectional-auto-flow-gps'
         run: |
           python3 tools/verify_auto_indoor_outdoor_loiter.py
 
