@@ -23,8 +23,10 @@
 //   SRC1 (index 0): GPS position + GPS velocity + Baro Z + Compass yaw
 //   SRC2 (index 1): no XY position + OpticalFlow velocity + Baro Z + Compass yaw
 // Normal takeoff prefers SRC2 whenever low-altitude Flow/Range is healthy.
-// In flight, SRC2 hands over once to SRC1 after GPS and height/speed gates pass.
-// SRC1 only falls back to SRC2 on GPS failure and only while Flow/Range is usable.
+// In flight, normal source selection is bidirectional with hysteresis:
+//   SRC2 Flow -> SRC1 GPS above 2.0 m after GPS/height/speed gates pass.
+//   SRC1 GPS  -> SRC2 Flow below 1.7 m after Flow/height/speed gates pass.
+// Emergency source degradation remains independent of the normal hysteresis.
 #if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
 #define AUTO_SOURCE_MANAGER_ENABLED 1
 #else
