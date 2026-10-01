@@ -209,14 +209,19 @@ for item in [
 if 'autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "low-alt Flow")' not in user:
     raise SystemExit("normal GPS->Flow request is missing")
 
-# FLOW_HANDOVER must establish true relative-only aiding before re-anchoring
-# Loiter. A failed normal handover rolls back to GPS and arms a retry cooldown.
+# FLOW_HANDOVER confirmation is intentionally relaxed after flight testing:
+# an EKF that has already established a GPS origin may keep absolute/GPS flags
+# valid even after SRC2 is selected. Success therefore requires the selected
+# source-set to be SRC2, usable relative navigation, Flow readiness and a short
+# confirmation hold; it must NOT require horiz_pos_abs/using_gps to clear.
 flow_handover_i = user.index("AutoSourceState::FLOW_HANDOVER")
 flow_handover_logic_i = user.index("} else if (autosrc_state == AutoSourceState::FLOW_HANDOVER)", flow_handover_i)
-flow_handover_text = user[flow_handover_logic_i:flow_handover_logic_i+4300]
+flow_handover_text = user[flow_handover_logic_i:flow_handover_logic_i+4700]
 for item in [
-    "!flow_handover_filter.flags.horiz_pos_abs",
-    "!flow_handover_filter.flags.using_gps",
+    "autosrc_active_set == AUTOSRC_FLOW_SOURCE_SET",
+    "flow_handover_filter.flags.horiz_pos_rel",
+    "!flow_handover_filter.flags.const_pos_mode",
+    "autosrc_flow_air_ready",
     "AUTOSRC_FLOW_NAV_CONFIRM_MS",
     "AUTOSRC_FLOW_HANDOVER_TIMEOUT_MS",
     "AUTOSRC_FLOW_LOSS_HOLD_MS",
@@ -227,6 +232,34 @@ for item in [
 ]:
     if item not in flow_handover_text:
         raise SystemExit(f"Flow handover confirmation/rollback missing: {item}")
+for forbidden in [
+    "!flow_handover_filter.flags.horiz_pos_abs",
+    "!flow_handover_filter.flags.using_gps",
+]:
+    if forbidden in flow_handover_text:
+        raise SystemExit(f"Flow handover is still over-constrained: {forbidden}")
+
+# Emergency FLOW_RECOVERY uses the same source-set + relative-navigation
+# completion principle so retained GPS capability flags cannot leave recovery
+# stuck forever after an absolute origin has existed.
+recovery_i = user.index("if (autosrc_state == AutoSourceState::FLOW_RECOVERY)")
+recovery_text = user[recovery_i:recovery_i+1700]
+for item in [
+    "recovery_flow_nav_ok",
+    "AUTOSRC_FLOW_SOURCE_SET",
+    "recovery_filter.flags.horiz_pos_rel",
+    "!recovery_filter.flags.const_pos_mode",
+    "loiter_nav->init_target();",
+    "AutoSrc Flow recovery complete",
+]:
+    if item not in recovery_text:
+        raise SystemExit(f"Flow recovery completion contract missing: {item}")
+for forbidden in [
+    "!recovery_filter.flags.horiz_pos_abs",
+    "!recovery_filter.flags.using_gps",
+]:
+    if forbidden in recovery_text:
+        raise SystemExit(f"Flow recovery is still over-constrained: {forbidden}")
 
 # The special FLOW_HANDOVER state must not be swallowed by the generic active
 # Flow branch after set_posvelyaw_source_set() immediately changes source_set.
@@ -413,6 +446,31 @@ for item in [
 ]:
     if item not in hook_text:
         raise SystemExit(f"deferred low-alt LAND revalidation missing: {item}")
+
+# Product LAND must return to Loiter standby only after native LAND has
+# completed and the vehicle is disarmed. Low-alt throttle LAND and RC8 LAND
+# both arm this pending return; unrelated LAND modes must not be forced.
+for item in [
+    "product_land_return_loiter_pending = true",
+    "product_land_return_loiter_pending = false",
+    "!motors->armed() && ap.land_complete && (flightmode == &mode_land)",
+    "set_mode(Mode::Number::LOITER, ModeReason::RC_COMMAND)",
+    "Product LAND complete; Loiter standby",
+]:
+    if item not in user:
+        raise SystemExit(f"product LAND Loiter-return contract missing: {item}")
+
+return_i = user.index("if (product_land_return_loiter_pending)")
+return_text = user[return_i:return_i+1700]
+if "flightmode != &mode_land" not in return_text:
+    raise SystemExit("product LAND return must cancel if another mode owner takes control")
+if return_text.index("!motors->armed() && ap.land_complete") > return_text.index("set_mode(Mode::Number::LOITER"):
+    raise SystemExit("product LAND must verify disarmed+landed before Loiter standby")
+
+aux_i2 = user.index("void Copter::userhook_auxSwitch1")
+aux_text2 = user[aux_i2:]
+if "product_land_return_loiter_pending = true" not in aux_text2:
+    raise SystemExit("RC8 LAND does not arm Loiter standby return")
 
 # Product-triggered LAND (low-alt throttle or RC8) locks pilot reposition and
 # high-throttle escape, while non-product LAND retains native parameter logic.
