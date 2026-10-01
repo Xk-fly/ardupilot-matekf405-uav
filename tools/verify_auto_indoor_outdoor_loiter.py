@@ -249,54 +249,98 @@ if gate_i > base_arm_i:
 
 # Low-altitude throttle landing contract.
 for item in [
-    "#define LOWALT_FLOOR_ENTER_CM 40",
-    "#define LOWALT_HARD_MIN_CM 30",
-    "#define LOWALT_FLOOR_RELEASE_CM 50",
+    "#define LOWALT_FLOOR_ENTER_CM 50",
+    "#define LOWALT_HARD_MIN_CM 40",
+    "#define LOWALT_FLOOR_RELEASE_CM 60",
     "#define LOWALT_RANGE_CONFIRM_MS 200U",
     "#define LOWALT_HARD_STOP_HOLD_MS 250U",
     "#define LOWALT_THROTTLE_MIN_CONTROL 50",
     "#define LOWALT_THROTTLE_LAND_HOLD_MS 1000U",
     "#define LOWALT_LAND_MAX_XY_SPEED_CMS 50.0f",
     "#define LOWALT_RANGE_FRESH_MS 350U",
+    "#define LOWALT_PREDICT_TARGET_CM 45.0f",
+    "#define LOWALT_PREDICT_SENSOR_LATENCY_MS 120U",
+    "#define LOWALT_PREDICT_MARGIN_CM 3.0f",
+    "#define LOWALT_PREDICT_ACCEL_SCALE 0.70f",
+    "#define LOWALT_PREDICT_MIN_ACCEL_CMSS 50.0f",
+    "#define LOWALT_PREDICT_MAX_TRIGGER_CM 100.0f",
+    "rangefinder.last_reading_ms(ROTATION_PITCH_270)",
     "rangefinder_state.alt_cm",
-    "rangefinder_state.last_healthy_ms",
     "rangefinder_alt_ok()",
     "lowalt_landing_state = LowAltLandingState::HOLD",
     "range_cm > LOWALT_FLOOR_RELEASE_CM",
     "(range_fresh && (range_cm <= LOWALT_HARD_MIN_CM))",
-    "if ((floor_active || hard_stop_active) && (target_climb_rate < 0.0f))",
+    "stopping_distance_cm",
+    "sensor_travel_cm",
+    "predicted_trigger_cm",
+    "LOWALT_PREDICT_ACCEL_SCALE",
+    "LOWALT_PREDICT_MAX_TRIGGER_CM",
+    "if ((floor_active || hard_stop_active || predictive_stop_active)",
     "target_climb_rate = 0.0f",
-    "range_cm <= LOWALT_FLOOR_RELEASE_CM",
     "channel_throttle->get_control_in() <= LOWALT_THROTTLE_MIN_CONTROL",
     "LOWALT_LAND_MAX_XY_SPEED_CMS",
     "LOWALT_THROTTLE_LAND_HOLD_MS",
-    "set_mode(Mode::Number::LAND, ModeReason::RC_COMMAND)",
+    "lowalt_land_request_pending = true",
+    "LowAlt LAND request queued",
     "LowAlt throttle LAND started",
 ]:
     if item not in user:
         raise SystemExit(f"low-alt throttle LAND contract missing: {item}")
 
+if "void low_alt_landing_guard(float &target_climb_rate);" not in copter_h:
+    raise SystemExit("low-alt guard must be a non-transitioning void helper")
+
 # LAND confirmation must require a current valid low-alt range. A latched floor
-# may survive NoData, but NoData must never be enough to start LAND.
+# may survive NoData, but NoData must never be enough to queue LAND.
 land_height_i = user.index("const bool land_height_confirmed")
-land_height_text = user[land_height_i:land_height_i+450]
+land_height_text = user[land_height_i:land_height_i+500]
 for item in ["range_fresh", "range_cm >= 0", "range_cm <= LOWALT_FLOOR_RELEASE_CM"]:
     if item not in land_height_text:
         raise SystemExit(f"low-alt LAND current-range gate missing: {item}")
 
-# The floor is applied only in Loiter's normal Flying state. Takeoff/ground
-# states reset it so OneKey takeoff cannot be mistaken for a landing request.
+# ModeLoiter may only clamp/queue. It must never change flight mode or return
+# early from the controller because the previous implementation caused a
+# flow_of_control internal error immediately after LAND transition.
+guard_start = user.index("void Copter::low_alt_landing_guard(float &target_climb_rate)")
+guard_end = user.index("bool Copter::autosrc_takeoff_ready()", guard_start)
+guard_text = user[guard_start:guard_end]
+if "set_mode(Mode::Number::LAND" in guard_text:
+    raise SystemExit("low-alt guard must not change mode inside ModeLoiter control stack")
+if "lowalt_land_request_pending = true" not in guard_text:
+    raise SystemExit("low-alt guard does not queue deferred LAND request")
+
 for item in [
     "if (loiter_state != AltHold_Flying)",
     "copter.low_alt_landing_guard_reset();",
-    "if (copter.low_alt_landing_guard(target_climb_rate))",
+    "copter.low_alt_landing_guard(target_climb_rate);",
 ]:
     if item not in loiter:
         raise SystemExit(f"Loiter low-alt integration missing: {item}")
 flying_i = loiter.index("case AltHold_Flying:")
-guard_i = loiter.index("copter.low_alt_landing_guard(target_climb_rate)", flying_i)
+guard_i = loiter.index("copter.low_alt_landing_guard(target_climb_rate);", flying_i)
 if guard_i < flying_i:
     raise SystemExit("low-alt landing guard must run only in AltHold_Flying")
+guard_tail = loiter[guard_i:guard_i+250]
+if "return;" in guard_tail:
+    raise SystemExit("Loiter must not early-return after low-alt guard")
+
+# The 50 Hz manager owns the actual LAND transition and must revalidate every
+# gate immediately before set_mode().
+hook_i = user.index("if (lowalt_land_request_pending)")
+hook_text = user[hook_i:hook_i+2200]
+for item in [
+    "rangefinder.last_reading_ms(ROTATION_PITCH_270)",
+    "lowalt_landing_state == LowAltLandingState::HOLD",
+    "lowalt_range_fresh",
+    "lowalt_range_cm <= LOWALT_FLOOR_RELEASE_CM",
+    "channel_throttle->get_control_in() <= LOWALT_THROTTLE_MIN_CONTROL",
+    "LOWALT_LAND_MAX_XY_SPEED_CMS",
+    "flightmode == &mode_loiter",
+    "set_mode(Mode::Number::LAND, ModeReason::RC_COMMAND)",
+    "low_alt_landing_guard_reset();",
+]:
+    if item not in hook_text:
+        raise SystemExit(f"deferred low-alt LAND revalidation missing: {item}")
 
 # Product-triggered LAND (low-alt throttle or RC8) locks pilot reposition and
 # high-throttle escape, while non-product LAND retains native parameter logic.
