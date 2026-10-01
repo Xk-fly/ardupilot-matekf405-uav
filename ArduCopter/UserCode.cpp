@@ -38,6 +38,10 @@
 #define AUTOSRC_GPS_NAV_CONFIRM_MS 1000U
 #define AUTOSRC_GPS_HANDOVER_TIMEOUT_MS 5000U
 #define AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS 15000U
+#define AUTOSRC_FLOW_HANDOVER_TIMEOUT_MS 5000U
+#define AUTOSRC_FLOW_HANDOVER_RETRY_COOLDOWN_MS 15000U
+#define AUTOSRC_FLOW_NAV_CONFIRM_MS 500U
+#define AUTOSRC_NORMAL_SOURCE_MIN_RESIDENCE_MS 5000U
 #define AUTOSRC_GPS_LOSS_HOLD_MS 2000U
 #define AUTOSRC_FLOW_MIN_QUALITY 50U
 #define AUTOSRC_FLOW_FRESH_MS 350U
@@ -48,10 +52,13 @@
 #define AUTOSRC_FLOW_LOSS_HOLD_MS 1200U
 #define AUTOSRC_BARO_GROUND_SETTLE_MS 1000U
 #define AUTOSRC_BARO_GROUND_TRACK_ALPHA 0.05f
-#define AUTOSRC_GPS_SWITCH_BARO_CM 160.0f
-#define AUTOSRC_GPS_SWITCH_BARO_HOLD_MS 1000U
+#define AUTOSRC_GPS_SWITCH_BARO_CM 200.0f
+#define AUTOSRC_GPS_SWITCH_BARO_HOLD_MS 400U
+#define AUTOSRC_FLOW_SWITCH_BARO_CM 170.0f
+#define AUTOSRC_FLOW_SWITCH_BARO_HOLD_MS 500U
 #define AUTOSRC_FLOW_MAX_BARO_CM 230.0f
 #define AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS 60.0f
+#define AUTOSRC_FLOW_SWITCH_MAX_XY_SPEED_CMS 60.0f
 #define AUTOSRC_DIAG_PERIOD_MS 5000U
 #define AUTOSRC_BOOT_SETTLE_MS 1500U
 
@@ -128,6 +135,7 @@ enum class AutoSourceState : uint8_t {
     GPS_GROUND,
     GPS_HANDOVER,
     GPS_ACTIVE,
+    FLOW_HANDOVER,
     FLOW_RECOVERY,
 };
 
@@ -141,12 +149,16 @@ static uint32_t autosrc_flow_air_since_ms = 0U;
 static uint32_t autosrc_flow_bad_since_ms = 0U;
 static uint32_t autosrc_transition_start_ms = 0U;
 static uint32_t autosrc_last_handover_fail_ms = 0U;
+static uint32_t autosrc_last_flow_handover_fail_ms = 0U;
+static uint32_t autosrc_last_successful_handover_ms = 0U;
+static uint32_t autosrc_flow_nav_since_ms = 0U;
 static uint32_t autosrc_flow_ground_selected_ms = 0U;
 static bool autosrc_flow_ground_suppressed = false;
 static float autosrc_baro_ground_ref_cm = 0.0f;
 static bool autosrc_baro_ground_ref_valid = false;
 static uint32_t autosrc_baro_ground_track_since_ms = 0U;
 static uint32_t autosrc_baro_switch_since_ms = 0U;
+static uint32_t autosrc_baro_flow_switch_since_ms = 0U;
 static bool autosrc_gps_raw_ready_cached = false;
 static bool autosrc_gps_nav_ready_cached = false;
 static bool autosrc_flow_ground_ready_cached = false;
@@ -717,7 +729,7 @@ void Copter::userhook_init()
 #if AUTO_SOURCE_MANAGER_ENABLED
     autosrc_boot_ms = AP_HAL::millis();
     autosrc_state = AutoSourceState::INIT;
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AutoSrc enabled: low Flow, high GPS");
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AutoSrc enabled: bidir Flow/GPS");
 #endif
 
 #if GIMBAL_RZ7889_RC7_CONTROL_ENABLED
@@ -925,6 +937,10 @@ void Copter::userhook_50Hz()
             autosrc_baro_ground_ref_valid = false;
         }
         autosrc_baro_switch_since_ms = 0U;
+        autosrc_baro_flow_switch_since_ms = 0U;
+        autosrc_flow_nav_since_ms = 0U;
+        autosrc_last_successful_handover_ms = 0U;
+        autosrc_last_flow_handover_fail_ms = 0U;
     } else if (motors->armed()) {
         // Force a fresh one-second ground reference after the next disarm.
         autosrc_baro_ground_track_since_ms = 0U;
@@ -943,6 +959,18 @@ void Copter::userhook_50Hz()
         (autosrc_baro_switch_since_ms != 0U) &&
         ((onekey_now_ms - autosrc_baro_switch_since_ms) >=
          AUTOSRC_GPS_SWITCH_BARO_HOLD_MS);
+
+    const bool autosrc_baro_flow_switch_now =
+        motors->armed() &&
+        autosrc_baro_ground_ref_valid &&
+        autosrc_baro_healthy &&
+        (autosrc_baro_rel_cm <= AUTOSRC_FLOW_SWITCH_BARO_CM);
+    update_hold(autosrc_baro_flow_switch_now,
+                autosrc_baro_flow_switch_since_ms);
+    const bool autosrc_baro_flow_switch_ready =
+        (autosrc_baro_flow_switch_since_ms != 0U) &&
+        ((onekey_now_ms - autosrc_baro_flow_switch_since_ms) >=
+         AUTOSRC_FLOW_SWITCH_BARO_HOLD_MS);
 
     const bool autosrc_gps_raw_ready =
         (autosrc_gps_raw_since_ms != 0U) &&
@@ -988,6 +1016,14 @@ void Copter::userhook_50Hz()
         (autosrc_last_handover_fail_ms == 0U) ||
         ((onekey_now_ms - autosrc_last_handover_fail_ms) >=
          AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS);
+    const bool autosrc_flow_retry_ready =
+        (autosrc_last_flow_handover_fail_ms == 0U) ||
+        ((onekey_now_ms - autosrc_last_flow_handover_fail_ms) >=
+         AUTOSRC_FLOW_HANDOVER_RETRY_COOLDOWN_MS);
+    const bool autosrc_source_residence_ready =
+        (autosrc_last_successful_handover_ms == 0U) ||
+        ((onekey_now_ms - autosrc_last_successful_handover_ms) >=
+         AUTOSRC_NORMAL_SOURCE_MIN_RESIDENCE_MS);
     // A failed Flow navigation acquisition is suppressed for the remainder
     // of the current healthy-ground episode while GPS remains viable. This
     // prevents periodic Flow/GPS source oscillation before takeoff. A real
@@ -1040,11 +1076,12 @@ void Copter::userhook_50Hz()
             autosrc_state = AutoSourceState::GPS_GROUND;
         }
     } else if (motors->armed() && !ap.land_complete) {
-        // Normal path: Flow owns low altitude. Once raw GPS has been stable,
-        // altitude is above the transition band, and horizontal motion is low,
-        // request GPS. Flow -> GPS is one-way for normal flight to prevent
-        // chatter; GPS -> Flow is reserved for an actual GPS failure.
+        // Normal path uses hysteresis: Flow owns low altitude and GPS owns
+        // high altitude. Normal Flow->GPS occurs above 2.0 m; normal GPS->Flow
+        // occurs below 1.7 m. A 30 cm deadband, minimum residence time and
+        // per-direction retry cooldown prevent source chatter.
         if ((autosrc_active_set == AUTOSRC_FLOW_SOURCE_SET) &&
+            (autosrc_state != AutoSourceState::FLOW_HANDOVER) &&
             (autosrc_state != AutoSourceState::FLOW_RECOVERY)) {
             autosrc_state = AutoSourceState::FLOW_ACTIVE;
 
@@ -1063,6 +1100,7 @@ void Copter::userhook_50Hz()
             const bool normal_gps_gate =
                 autosrc_gps_raw_ready &&
                 autosrc_gps_retry_ready &&
+                autosrc_source_residence_ready &&
                 autosrc_baro_switch_ready &&
                 (autosrc_xy_speed_cms <= AUTOSRC_GPS_SWITCH_MAX_XY_SPEED_CMS) &&
                 (flightmode == &mode_loiter);
@@ -1090,6 +1128,7 @@ void Copter::userhook_50Hz()
                 autosrc_state = AutoSourceState::GPS_ACTIVE;
                 autosrc_gps_bad_since_ms = 0U;
                 autosrc_last_handover_fail_ms = 0U;
+                autosrc_last_successful_handover_ms = onekey_now_ms;
                 GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AutoSrc GPS handover complete");
             } else if ((onekey_now_ms - autosrc_transition_start_ms) >=
                        AUTOSRC_GPS_HANDOVER_TIMEOUT_MS) {
@@ -1105,6 +1144,69 @@ void Copter::userhook_50Hz()
                     GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
                                   "AutoSrc GPS handover slow; no safe Flow fallback");
                 }
+            }
+        } else if (autosrc_state == AutoSourceState::FLOW_HANDOVER) {
+            nav_filter_status flow_handover_filter = inertial_nav.get_filter_status();
+            const bool flow_nav_now =
+                flow_handover_filter.flags.horiz_pos_rel &&
+                !flow_handover_filter.flags.horiz_pos_abs &&
+                !flow_handover_filter.flags.using_gps &&
+                !flow_handover_filter.flags.const_pos_mode;
+            update_hold(flow_nav_now, autosrc_flow_nav_since_ms);
+
+            if (!autosrc_flow_air_now) {
+                if (autosrc_flow_bad_since_ms == 0U) {
+                    autosrc_flow_bad_since_ms = onekey_now_ms;
+                }
+            } else {
+                autosrc_flow_bad_since_ms = 0U;
+            }
+
+            const bool flow_handover_sensor_failed =
+                (autosrc_flow_bad_since_ms != 0U) &&
+                ((onekey_now_ms - autosrc_flow_bad_since_ms) >=
+                 AUTOSRC_FLOW_LOSS_HOLD_MS);
+            const bool flow_nav_confirmed =
+                autosrc_flow_air_ready &&
+                (autosrc_flow_nav_since_ms != 0U) &&
+                ((onekey_now_ms - autosrc_flow_nav_since_ms) >=
+                 AUTOSRC_FLOW_NAV_CONFIRM_MS);
+
+            if (flow_nav_confirmed) {
+                if (flightmode == &mode_loiter) {
+                    // Re-anchor after absolute->relative aiding becomes real.
+                    loiter_nav->init_target();
+                }
+                autosrc_state = AutoSourceState::FLOW_ACTIVE;
+                autosrc_flow_bad_since_ms = 0U;
+                autosrc_last_flow_handover_fail_ms = 0U;
+                autosrc_last_successful_handover_ms = onekey_now_ms;
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                              "AutoSrc Flow handover complete");
+            } else if ((flow_handover_sensor_failed ||
+                        ((onekey_now_ms - autosrc_transition_start_ms) >=
+                         AUTOSRC_FLOW_HANDOVER_TIMEOUT_MS)) &&
+                       autosrc_gps_raw_ready) {
+                // Normal low-altitude handover failed while GPS is still
+                // viable. Return to GPS and suppress another normal Flow try
+                // for the retry cooldown.
+                autosrc_last_flow_handover_fail_ms = onekey_now_ms;
+                autosrc_select_source(AUTOSRC_GPS_SOURCE_SET,
+                                      flow_handover_sensor_failed ?
+                                      "Flow handover lost" :
+                                      "Flow handover timeout");
+                autosrc_transition_start_ms = onekey_now_ms;
+                autosrc_gps_nav_since_ms = 0U;
+                autosrc_flow_nav_since_ms = 0U;
+                autosrc_state = AutoSourceState::GPS_HANDOVER;
+            } else if ((onekey_now_ms - autosrc_transition_start_ms) >=
+                       AUTOSRC_FLOW_HANDOVER_TIMEOUT_MS) {
+                // GPS is no longer a safe rollback target. Keep Flow selected
+                // and let the existing recovery/failsafe path own the case.
+                autosrc_last_flow_handover_fail_ms = onekey_now_ms;
+                autosrc_state = AutoSourceState::FLOW_RECOVERY;
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                              "AutoSrc Flow handover slow; GPS unavailable");
             }
         } else if ((autosrc_active_set == AUTOSRC_GPS_SOURCE_SET) &&
                    (autosrc_state != AutoSourceState::FLOW_RECOVERY)) {
@@ -1122,26 +1224,52 @@ void Copter::userhook_50Hz()
 
             const bool gps_failed =
                 (autosrc_gps_bad_since_ms != 0U) &&
-                ((onekey_now_ms - autosrc_gps_bad_since_ms) >= AUTOSRC_GPS_LOSS_HOLD_MS);
+                ((onekey_now_ms - autosrc_gps_bad_since_ms) >=
+                 AUTOSRC_GPS_LOSS_HOLD_MS);
 
-            if (gps_failed &&
+            const bool normal_flow_gate =
+                !gps_failed &&
+                autosrc_gps_nav_now &&
                 autosrc_flow_air_ready &&
-                (flightmode == &mode_loiter)) {
+                autosrc_flow_retry_ready &&
+                autosrc_source_residence_ready &&
+                autosrc_baro_flow_switch_ready &&
+                (autosrc_xy_speed_cms <= AUTOSRC_FLOW_SWITCH_MAX_XY_SPEED_CMS) &&
+                (flightmode == &mode_loiter);
+
+            const bool emergency_flow_gate =
+                gps_failed &&
+                autosrc_flow_air_ready &&
+                (flightmode == &mode_loiter);
+
+            if (emergency_flow_gate) {
+                // Existing emergency degradation path: bypass normal altitude,
+                // speed, residence and retry gates.
                 autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "GPS lost");
                 autosrc_transition_start_ms = onekey_now_ms;
+                autosrc_flow_nav_since_ms = 0U;
                 autosrc_flow_air_since_ms = 0U;
                 autosrc_state = AutoSourceState::FLOW_RECOVERY;
+            } else if (normal_flow_gate) {
+                autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "low-alt Flow");
+                autosrc_transition_start_ms = onekey_now_ms;
+                autosrc_flow_nav_since_ms = 0U;
+                autosrc_flow_bad_since_ms = 0U;
+                autosrc_state = AutoSourceState::FLOW_HANDOVER;
             }
         }
 
         if (autosrc_state == AutoSourceState::FLOW_RECOVERY) {
             nav_filter_status recovery_filter = inertial_nav.get_filter_status();
             if (recovery_filter.flags.horiz_pos_rel &&
+                !recovery_filter.flags.horiz_pos_abs &&
+                !recovery_filter.flags.using_gps &&
                 !recovery_filter.flags.const_pos_mode) {
                 if (flightmode == &mode_loiter) {
                     loiter_nav->init_target();
                 }
                 autosrc_state = AutoSourceState::FLOW_ACTIVE;
+                autosrc_last_successful_handover_ms = onekey_now_ms;
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
                               "AutoSrc Flow recovery complete");
             }
