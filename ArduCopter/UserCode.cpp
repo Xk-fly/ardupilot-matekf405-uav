@@ -127,6 +127,7 @@ static uint32_t lowalt_predict_stop_until_ms = 0U;
 static uint32_t lowalt_last_range_sample_ms = 0U;
 static bool lowalt_land_request_pending = false;
 static bool product_land_stick_lock = false;
+static bool product_land_return_loiter_pending = false;
 #endif
 
 #if AUTO_SOURCE_MANAGER_ENABLED
@@ -798,6 +799,25 @@ void Copter::userhook_50Hz()
     const uint32_t onekey_now_ms = AP_HAL::millis();
 
 #if LOWALT_THROTTLE_LAND_ENABLED
+    // Product-triggered LAND returns to the product's single normal standby
+    // mode only after native LAND has completed and the vehicle is disarmed.
+    // Non-product LAND (failsafe/GCS/etc.) is deliberately left untouched.
+    if (product_land_return_loiter_pending) {
+        if (!motors->armed() && ap.land_complete && (flightmode == &mode_land)) {
+            if (set_mode(Mode::Number::LOITER, ModeReason::RC_COMMAND)) {
+                product_land_return_loiter_pending = false;
+                product_land_stick_lock = false;
+                low_alt_landing_guard_reset();
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                              "Product LAND complete; Loiter standby");
+            }
+        } else if (flightmode != &mode_land) {
+            // Another explicit mode owner took control before the product
+            // landing episode completed. Do not force a later Loiter return.
+            product_land_return_loiter_pending = false;
+        }
+    }
+
     // Product LAND stick lock is scoped to the active LAND episode only.
     if (!motors->armed() ||
         (product_land_stick_lock && (flightmode != &mode_land))) {
@@ -834,8 +854,10 @@ void Copter::userhook_50Hz()
 
         if (lowalt_request_valid) {
             product_land_stick_lock = true;
+            product_land_return_loiter_pending = true;
             if (!set_mode(Mode::Number::LAND, ModeReason::RC_COMMAND)) {
                 product_land_stick_lock = false;
+                product_land_return_loiter_pending = false;
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
                               "LowAlt throttle LAND failed");
             } else {
@@ -1149,10 +1171,15 @@ void Copter::userhook_50Hz()
             }
         } else if (autosrc_state == AutoSourceState::FLOW_HANDOVER) {
             nav_filter_status flow_handover_filter = inertial_nav.get_filter_status();
+
+            // EKF may keep horiz_pos_abs/using_gps flags valid after a GPS
+            // origin has been established, even though SRC2 is now the
+            // selected horizontal aiding set. Do not require those historical
+            // capabilities to disappear. Confirm the handover from the actual
+            // source-set selection plus usable relative navigation.
             const bool flow_nav_now =
+                (autosrc_active_set == AUTOSRC_FLOW_SOURCE_SET) &&
                 flow_handover_filter.flags.horiz_pos_rel &&
-                !flow_handover_filter.flags.horiz_pos_abs &&
-                !flow_handover_filter.flags.using_gps &&
                 !flow_handover_filter.flags.const_pos_mode;
             update_hold(flow_nav_now, autosrc_flow_nav_since_ms);
 
@@ -1263,10 +1290,12 @@ void Copter::userhook_50Hz()
 
         if (autosrc_state == AutoSourceState::FLOW_RECOVERY) {
             nav_filter_status recovery_filter = inertial_nav.get_filter_status();
-            if (recovery_filter.flags.horiz_pos_rel &&
-                !recovery_filter.flags.horiz_pos_abs &&
-                !recovery_filter.flags.using_gps &&
-                !recovery_filter.flags.const_pos_mode) {
+            const bool recovery_flow_nav_ok =
+                (AP::ahrs().get_posvelyaw_source_set() ==
+                 AUTOSRC_FLOW_SOURCE_SET) &&
+                recovery_filter.flags.horiz_pos_rel &&
+                !recovery_filter.flags.const_pos_mode;
+            if (recovery_flow_nav_ok) {
                 if (flightmode == &mode_loiter) {
                     loiter_nav->init_target();
                 }
@@ -1597,10 +1626,12 @@ void Copter::userhook_auxSwitch1(const RC_Channel::AuxSwitchPos ch_flag)
 
 #if LOWALT_THROTTLE_LAND_ENABLED
         product_land_stick_lock = true;
+        product_land_return_loiter_pending = true;
 #endif
         if (!set_mode(Mode::Number::LAND, ModeReason::RC_COMMAND)) {
 #if LOWALT_THROTTLE_LAND_ENABLED
             product_land_stick_lock = false;
+            product_land_return_loiter_pending = false;
 #endif
             GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey LAND failed");
             return;
