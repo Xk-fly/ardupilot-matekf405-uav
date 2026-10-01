@@ -192,13 +192,10 @@ void ModeLoiter::run()
         // call attitude controller
         attitude_control->input_thrust_vector_rate_heading(loiter_nav->get_thrust_vector(), target_yaw_rate, false);
 
-        // Low-altitude rangefinder floor. This can clamp only a
-        // downward pilot command, or switch to native LAND after deliberate
-        // minimum-throttle confirmation. If mode changes, stop this Loiter
-        // iteration immediately and let LAND own the next control cycle.
-        if (copter.low_alt_landing_guard(target_climb_rate)) {
-            return;
-        }
+        // Low-altitude rangefinder floor. This helper may clamp only a
+        // downward pilot command and may queue a LAND request, but it never
+        // changes mode from inside the active Loiter control stack.
+        copter.low_alt_landing_guard(target_climb_rate);
 
         // get avoidance adjusted climb rate
         target_climb_rate = get_avoidance_adjusted_climbrate(target_climb_rate);
