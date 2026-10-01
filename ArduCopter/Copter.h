@@ -968,7 +968,7 @@ private:
     // UserCode.cpp
     void userhook_init();
     bool autosrc_takeoff_ready();
-    bool low_alt_landing_guard(float &target_climb_rate);
+    void low_alt_landing_guard(float &target_climb_rate);
     void low_alt_landing_guard_reset();
     bool product_land_stick_locked() const;
     void userhook_FastLoop();
