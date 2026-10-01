@@ -64,15 +64,21 @@
 #else
 #define LOWALT_THROTTLE_LAND_ENABLED 0
 #endif
-#define LOWALT_FLOOR_ENTER_CM 40
-#define LOWALT_HARD_MIN_CM 30
-#define LOWALT_FLOOR_RELEASE_CM 50
+#define LOWALT_FLOOR_ENTER_CM 50
+#define LOWALT_HARD_MIN_CM 40
+#define LOWALT_FLOOR_RELEASE_CM 60
 #define LOWALT_RANGE_CONFIRM_MS 200U
 #define LOWALT_HARD_STOP_HOLD_MS 250U
 #define LOWALT_THROTTLE_MIN_CONTROL 50
 #define LOWALT_THROTTLE_LAND_HOLD_MS 1000U
 #define LOWALT_LAND_MAX_XY_SPEED_CMS 50.0f
 #define LOWALT_RANGE_FRESH_MS 350U
+#define LOWALT_PREDICT_TARGET_CM 45.0f
+#define LOWALT_PREDICT_SENSOR_LATENCY_MS 120U
+#define LOWALT_PREDICT_MARGIN_CM 3.0f
+#define LOWALT_PREDICT_ACCEL_SCALE 0.70f
+#define LOWALT_PREDICT_MIN_ACCEL_CMSS 50.0f
+#define LOWALT_PREDICT_MAX_TRIGGER_CM 100.0f
 
 namespace {
 
@@ -108,7 +114,9 @@ static uint32_t lowalt_enter_since_ms = 0U;
 static uint32_t lowalt_release_since_ms = 0U;
 static uint32_t lowalt_throttle_land_since_ms = 0U;
 static uint32_t lowalt_hard_stop_until_ms = 0U;
+static uint32_t lowalt_predict_stop_until_ms = 0U;
 static uint32_t lowalt_last_range_sample_ms = 0U;
+static bool lowalt_land_request_pending = false;
 static bool product_land_stick_lock = false;
 #endif
 
@@ -176,7 +184,9 @@ void Copter::low_alt_landing_guard_reset()
     lowalt_release_since_ms = 0U;
     lowalt_throttle_land_since_ms = 0U;
     lowalt_hard_stop_until_ms = 0U;
+    lowalt_predict_stop_until_ms = 0U;
     lowalt_last_range_sample_ms = 0U;
+    lowalt_land_request_pending = false;
 #endif
 }
 
@@ -189,42 +199,76 @@ bool Copter::product_land_stick_locked() const
 #endif
 }
 
-bool Copter::low_alt_landing_guard(float &target_climb_rate)
+void Copter::low_alt_landing_guard(float &target_climb_rate)
 {
 #if LOWALT_THROTTLE_LAND_ENABLED
     const uint32_t now_ms = AP_HAL::millis();
 
     // This helper is intentionally called only from Loiter's normal Flying
-    // state.  Reset all pre-trigger state if it is ever reached outside the
-    // normal armed flight contract.
+    // state.  It may clamp downward demand and queue a LAND request, but it
+    // must never change flight mode from inside ModeLoiter::run().
     if (!motors->armed() ||
         ap.land_complete ||
         (flightmode != &mode_loiter) ||
         failsafe.radio) {
         low_alt_landing_guard_reset();
-        return false;
+        return;
     }
 
+    const uint32_t range_sample_ms =
+        rangefinder.last_reading_ms(ROTATION_PITCH_270);
     const bool range_fresh =
         rangefinder_alt_ok() &&
-        ((now_ms - rangefinder_state.last_healthy_ms) <= LOWALT_RANGE_FRESH_MS);
+        (range_sample_ms != 0U) &&
+        ((now_ms - range_sample_ms) <= LOWALT_RANGE_FRESH_MS);
     const int32_t range_cm = range_fresh ? int32_t(rangefinder_state.alt_cm) : -1;
-    const uint32_t range_sample_ms = rangefinder_state.last_healthy_ms;
     const bool new_range_sample =
         range_fresh &&
-        (range_sample_ms != 0U) &&
         (range_sample_ms != lowalt_last_range_sample_ms);
+
+    // Predict the distance needed to stop an existing descent.  Use 70% of
+    // the configured Z acceleration as a conservative braking estimate, then
+    // add one sensor-latency allowance and a small range margin.  This is only
+    // a transient descent clamp; it never latches LAND or the low-alt floor
+    // from a single sample.
+    const float down_speed_cms =
+        MAX(0.0f, -inertial_nav.get_velocity_z_up_cms());
+    const float configured_accel_cmss =
+        MAX(pos_control->get_max_accel_z_cmss(), LOWALT_PREDICT_MIN_ACCEL_CMSS);
+    const float brake_accel_cmss =
+        MAX(configured_accel_cmss * LOWALT_PREDICT_ACCEL_SCALE,
+            LOWALT_PREDICT_MIN_ACCEL_CMSS);
+    const float stopping_distance_cm =
+        (down_speed_cms * down_speed_cms) / (2.0f * brake_accel_cmss);
+    const float sensor_travel_cm =
+        down_speed_cms * (float(LOWALT_PREDICT_SENSOR_LATENCY_MS) * 0.001f);
+    const float predicted_trigger_cm =
+        MIN(LOWALT_PREDICT_MAX_TRIGGER_CM,
+            LOWALT_PREDICT_TARGET_CM +
+            stopping_distance_cm +
+            sensor_travel_cm +
+            LOWALT_PREDICT_MARGIN_CM);
 
     if (new_range_sample) {
         lowalt_last_range_sample_ms = range_sample_ms;
 
-        // A single <=30 cm sample immediately pauses further descent for a
-        // short bounded interval, but does not permanently latch the floor.
-        // A following healthy >30 cm sample clears this transient stop.
+        // A single <=40 cm sample immediately pauses further descent for a
+        // short bounded interval, but never permanently latches the floor.
         if (range_cm <= LOWALT_HARD_MIN_CM) {
             lowalt_hard_stop_until_ms = now_ms + LOWALT_HARD_STOP_HOLD_MS;
         } else {
             lowalt_hard_stop_until_ms = 0U;
+        }
+
+        // While actually descending, begin braking early enough that the
+        // vehicle should settle near the 40-50 cm band instead of overshooting
+        // toward 20 cm. A single anomalous low sample can only cause a short
+        // pause; the persistent floor still requires the 200 ms confirmation.
+        if ((target_climb_rate < 0.0f) &&
+            (down_speed_cms > 5.0f) &&
+            (float(range_cm) <= predicted_trigger_cm)) {
+            lowalt_predict_stop_until_ms =
+                now_ms + LOWALT_HARD_STOP_HOLD_MS;
         }
 
         if (lowalt_landing_state == LowAltLandingState::NORMAL) {
@@ -246,8 +290,8 @@ bool Copter::low_alt_landing_guard(float &target_climb_rate)
                 lowalt_enter_since_ms = 0U;
             }
         } else {
-            // Once the low-alt floor is latched, NoData never releases it.
-            // Only a confirmed valid >50 cm sequence can return to NORMAL.
+            // Once the floor is latched, NoData never releases it. Only a
+            // confirmed valid >60 cm sequence returns to normal flight.
             lowalt_enter_since_ms = 0U;
             if (range_cm > LOWALT_FLOOR_RELEASE_CM) {
                 if (lowalt_release_since_ms == 0U) {
@@ -271,22 +315,27 @@ bool Copter::low_alt_landing_guard(float &target_climb_rate)
         (range_fresh && (range_cm <= LOWALT_HARD_MIN_CM)) ||
         ((lowalt_hard_stop_until_ms != 0U) &&
          (int32_t(lowalt_hard_stop_until_ms - now_ms) > 0));
+    const bool predictive_stop_active =
+        (lowalt_predict_stop_until_ms != 0U) &&
+        (int32_t(lowalt_predict_stop_until_ms - now_ms) > 0);
     const bool floor_active =
         (lowalt_landing_state == LowAltLandingState::HOLD);
 
     // The guard is deliberately asymmetric: only downward pilot demand is
-    // blocked.  Horizontal Loiter and upward climb remain fully available.
-    if ((floor_active || hard_stop_active) && (target_climb_rate < 0.0f)) {
+    // blocked. Horizontal Loiter and upward climb remain fully available.
+    if ((floor_active || hard_stop_active || predictive_stop_active) &&
+        (target_climb_rate < 0.0f)) {
         target_climb_rate = 0.0f;
     }
 
     if (!floor_active) {
         lowalt_throttle_land_since_ms = 0U;
-        return false;
+        lowalt_land_request_pending = false;
+        return;
     }
 
     // LAND confirmation requires a current valid low-altitude range as well
-    // as the latched floor.  If the laser goes NoData over an edge, the floor
+    // as the latched floor. If the laser goes NoData over an edge, the floor
     // remains protective but LAND cannot be triggered blindly.
     const bool land_height_confirmed =
         range_fresh &&
@@ -304,31 +353,21 @@ bool Copter::low_alt_landing_guard(float &target_climb_rate)
             lowalt_throttle_land_since_ms = now_ms;
         } else if ((now_ms - lowalt_throttle_land_since_ms) >=
                    LOWALT_THROTTLE_LAND_HOLD_MS) {
-            // Native LAND owns descent, touchdown detection and auto-disarm.
-            // Lock pilot reposition/cancel paths for this product-triggered
-            // landing so stick motion cannot disturb the final descent.
-            product_land_stick_lock = true;
-            lowalt_throttle_land_since_ms = 0U;
-
-            if (!set_mode(Mode::Number::LAND, ModeReason::RC_COMMAND)) {
-                product_land_stick_lock = false;
-                GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
-                              "LowAlt throttle LAND failed");
-                return false;
+            // Queue the request only. userhook_50Hz() performs the actual mode
+            // transition outside the active Loiter control stack.
+            if (!lowalt_land_request_pending) {
+                lowalt_land_request_pending = true;
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                              "LowAlt LAND request queued");
             }
-
-            GCS_SEND_TEXT(MAV_SEVERITY_INFO,
-                          "LowAlt throttle LAND started");
-            return true;
+            target_climb_rate = 0.0f;
         }
     } else {
         lowalt_throttle_land_since_ms = 0U;
+        lowalt_land_request_pending = false;
     }
-
-    return false;
 #else
     (void)target_climb_rate;
-    return false;
 #endif
 }
 
@@ -749,6 +788,52 @@ void Copter::userhook_50Hz()
     if (!motors->armed() ||
         (product_land_stick_lock && (flightmode != &mode_land))) {
         product_land_stick_lock = false;
+    }
+
+    // A low-altitude throttle LAND request is executed here, outside
+    // ModeLoiter::run(). Revalidate every safety gate immediately before the
+    // mode transition so a stale request can never force LAND.
+    if (lowalt_land_request_pending) {
+        const uint32_t lowalt_range_ms =
+            rangefinder.last_reading_ms(ROTATION_PITCH_270);
+        const bool lowalt_range_fresh =
+            rangefinder_alt_ok() &&
+            (lowalt_range_ms != 0U) &&
+            ((onekey_now_ms - lowalt_range_ms) <= LOWALT_RANGE_FRESH_MS);
+        const int32_t lowalt_range_cm =
+            lowalt_range_fresh ? int32_t(rangefinder_state.alt_cm) : -1;
+        const bool lowalt_request_valid =
+            motors->armed() &&
+            !ap.land_complete &&
+            !failsafe.radio &&
+            (flightmode == &mode_loiter) &&
+            (lowalt_landing_state == LowAltLandingState::HOLD) &&
+            lowalt_range_fresh &&
+            (lowalt_range_cm >= 0) &&
+            (lowalt_range_cm <= LOWALT_FLOOR_RELEASE_CM) &&
+            (channel_throttle != nullptr) &&
+            (channel_throttle->get_control_in() <= LOWALT_THROTTLE_MIN_CONTROL) &&
+            (inertial_nav.get_velocity_xy_cms().length() <=
+             LOWALT_LAND_MAX_XY_SPEED_CMS);
+
+        lowalt_land_request_pending = false;
+
+        if (lowalt_request_valid) {
+            product_land_stick_lock = true;
+            if (!set_mode(Mode::Number::LAND, ModeReason::RC_COMMAND)) {
+                product_land_stick_lock = false;
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                              "LowAlt throttle LAND failed");
+            } else {
+                low_alt_landing_guard_reset();
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                              "LowAlt throttle LAND started");
+            }
+        } else {
+            lowalt_throttle_land_since_ms = 0U;
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                          "LowAlt LAND request cancelled");
+        }
     }
 #endif
 
