@@ -39,8 +39,11 @@
 #define AUTOSRC_GPS_RAW_HOLD_MS 3000U
 #define AUTOSRC_GPS_NAV_CONFIRM_MS 1000U
 #define AUTOSRC_GPS_HANDOVER_TIMEOUT_MS 5000U
-#define AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS 15000U
+#define AUTOSRC_GPS_HANDOVER_FAST_ROLLBACK_MS 2500U
 #define AUTOSRC_FLOW_HANDOVER_TIMEOUT_MS 5000U
+#define AUTOSRC_FLOW_HANDOVER_FAST_ROLLBACK_MS 2500U
+#define AUTOSRC_HANDOVER_NAV_GAP_HOLD_MS 300U
+#define AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS 15000U
 #define AUTOSRC_FLOW_HANDOVER_RETRY_COOLDOWN_MS 15000U
 #define AUTOSRC_FLOW_NAV_CONFIRM_MS 500U
 #define AUTOSRC_NORMAL_SOURCE_MIN_RESIDENCE_MS 5000U
@@ -151,6 +154,8 @@ static uint32_t autosrc_flow_ground_since_ms = 0U;
 static uint32_t autosrc_flow_air_since_ms = 0U;
 static uint32_t autosrc_flow_bad_since_ms = 0U;
 static uint32_t autosrc_transition_start_ms = 0U;
+static uint32_t autosrc_gps_handover_gap_since_ms = 0U;
+static uint32_t autosrc_flow_handover_gap_since_ms = 0U;
 static uint32_t autosrc_last_handover_fail_ms = 0U;
 static uint32_t autosrc_last_flow_handover_fail_ms = 0U;
 static uint32_t autosrc_last_successful_handover_ms = 0U;
@@ -963,6 +968,8 @@ void Copter::userhook_50Hz()
         autosrc_baro_switch_since_ms = 0U;
         autosrc_baro_flow_switch_since_ms = 0U;
         autosrc_flow_nav_since_ms = 0U;
+        autosrc_gps_handover_gap_since_ms = 0U;
+        autosrc_flow_handover_gap_since_ms = 0U;
         autosrc_last_successful_handover_ms = 0U;
         autosrc_last_flow_handover_fail_ms = 0U;
     } else if (motors->armed()) {
@@ -1139,10 +1146,29 @@ void Copter::userhook_50Hz()
                                       emergency_gps_gate ? "Flow lost" : "high-alt GPS");
                 autosrc_transition_start_ms = onekey_now_ms;
                 autosrc_gps_nav_since_ms = 0U;
+                autosrc_gps_handover_gap_since_ms = 0U;
                 autosrc_state = AutoSourceState::GPS_HANDOVER;
             }
         } else if (autosrc_state == AutoSourceState::GPS_HANDOVER) {
-            if (autosrc_gps_nav_ready) {
+            nav_filter_status gps_handover_filter = inertial_nav.get_filter_status();
+            const bool gps_handover_has_horizontal_nav =
+                (gps_handover_filter.flags.horiz_pos_abs ||
+                 gps_handover_filter.flags.horiz_pos_rel) &&
+                !gps_handover_filter.flags.const_pos_mode;
+            update_hold(!gps_handover_has_horizontal_nav,
+                        autosrc_gps_handover_gap_since_ms);
+
+            const bool gps_handover_nav_gap =
+                (autosrc_gps_handover_gap_since_ms != 0U) &&
+                ((onekey_now_ms - autosrc_gps_handover_gap_since_ms) >=
+                 AUTOSRC_HANDOVER_NAV_GAP_HOLD_MS);
+            const bool gps_handover_slow =
+                ((onekey_now_ms - autosrc_transition_start_ms) >=
+                 AUTOSRC_GPS_HANDOVER_FAST_ROLLBACK_MS) &&
+                !autosrc_gps_nav_ready;
+
+            if ((autosrc_active_set == AUTOSRC_GPS_SOURCE_SET) &&
+                autosrc_gps_nav_ready) {
                 if (flightmode == &mode_loiter) {
                     // Re-anchor the Loiter target after EKF relative->absolute
                     // position reset. This avoids commanding the old Flow-frame
@@ -1151,19 +1177,39 @@ void Copter::userhook_50Hz()
                 }
                 autosrc_state = AutoSourceState::GPS_ACTIVE;
                 autosrc_gps_bad_since_ms = 0U;
+                autosrc_gps_handover_gap_since_ms = 0U;
                 autosrc_last_handover_fail_ms = 0U;
                 autosrc_last_successful_handover_ms = onekey_now_ms;
                 GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AutoSrc GPS handover complete");
+            } else if ((gps_handover_nav_gap || gps_handover_slow) &&
+                       autosrc_flow_air_ready) {
+                // Do not sit in a source-transition gap waiting for the full
+                // hard timeout. If GPS has not established absolute aiding
+                // quickly enough, or all horizontal navigation disappeared
+                // for a sustained interval, immediately return to still-ready
+                // Flow before the EKF failsafe counter can mature.
+                autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET,
+                                      gps_handover_nav_gap ?
+                                      "GPS handover nav gap" :
+                                      "GPS handover slow");
+                autosrc_transition_start_ms = onekey_now_ms;
+                autosrc_gps_handover_gap_since_ms = 0U;
+                autosrc_flow_nav_since_ms = 0U;
+                autosrc_last_handover_fail_ms = onekey_now_ms;
+                autosrc_state = AutoSourceState::FLOW_RECOVERY;
             } else if ((onekey_now_ms - autosrc_transition_start_ms) >=
                        AUTOSRC_GPS_HANDOVER_TIMEOUT_MS) {
                 if (autosrc_flow_air_ready) {
                     autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "GPS handover timeout");
                     autosrc_transition_start_ms = onekey_now_ms;
+                    autosrc_gps_handover_gap_since_ms = 0U;
+                    autosrc_flow_nav_since_ms = 0U;
                     autosrc_last_handover_fail_ms = onekey_now_ms;
                     autosrc_state = AutoSourceState::FLOW_RECOVERY;
                 } else {
-                    // Flow is not a safe fallback at this height. Leave GPS
-                    // selected and let normal EKF failsafe policy own the case.
+                    // No safe horizontal fallback is available. Keep GPS
+                    // selected and let native EKF failsafe policy own the case.
+                    autosrc_gps_handover_gap_since_ms = 0U;
                     autosrc_state = AutoSourceState::GPS_ACTIVE;
                     GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
                                   "AutoSrc GPS handover slow; no safe Flow fallback");
@@ -1171,6 +1217,12 @@ void Copter::userhook_50Hz()
             }
         } else if (autosrc_state == AutoSourceState::FLOW_HANDOVER) {
             nav_filter_status flow_handover_filter = inertial_nav.get_filter_status();
+            const bool flow_handover_has_horizontal_nav =
+                (flow_handover_filter.flags.horiz_pos_abs ||
+                 flow_handover_filter.flags.horiz_pos_rel) &&
+                !flow_handover_filter.flags.const_pos_mode;
+            update_hold(!flow_handover_has_horizontal_nav,
+                        autosrc_flow_handover_gap_since_ms);
 
             // EKF may keep horiz_pos_abs/using_gps flags valid after a GPS
             // origin has been established, even though SRC2 is now the
@@ -1200,6 +1252,14 @@ void Copter::userhook_50Hz()
                 (autosrc_flow_nav_since_ms != 0U) &&
                 ((onekey_now_ms - autosrc_flow_nav_since_ms) >=
                  AUTOSRC_FLOW_NAV_CONFIRM_MS);
+            const bool flow_handover_nav_gap =
+                (autosrc_flow_handover_gap_since_ms != 0U) &&
+                ((onekey_now_ms - autosrc_flow_handover_gap_since_ms) >=
+                 AUTOSRC_HANDOVER_NAV_GAP_HOLD_MS);
+            const bool flow_handover_slow =
+                ((onekey_now_ms - autosrc_transition_start_ms) >=
+                 AUTOSRC_FLOW_HANDOVER_FAST_ROLLBACK_MS) &&
+                !flow_nav_confirmed;
 
             if (flow_nav_confirmed) {
                 if (flightmode == &mode_loiter) {
@@ -1208,31 +1268,41 @@ void Copter::userhook_50Hz()
                 }
                 autosrc_state = AutoSourceState::FLOW_ACTIVE;
                 autosrc_flow_bad_since_ms = 0U;
+                autosrc_flow_handover_gap_since_ms = 0U;
                 autosrc_last_flow_handover_fail_ms = 0U;
                 autosrc_last_successful_handover_ms = onekey_now_ms;
                 GCS_SEND_TEXT(MAV_SEVERITY_INFO,
                               "AutoSrc Flow handover complete");
             } else if ((flow_handover_sensor_failed ||
+                        flow_handover_nav_gap ||
+                        flow_handover_slow ||
                         ((onekey_now_ms - autosrc_transition_start_ms) >=
                          AUTOSRC_FLOW_HANDOVER_TIMEOUT_MS)) &&
                        autosrc_gps_raw_ready) {
                 // Normal low-altitude handover failed while GPS is still
-                // viable. Return to GPS and suppress another normal Flow try
-                // for the retry cooldown.
+                // viable. Roll back early on a sustained navigation gap or
+                // slow Flow acquisition instead of waiting for the full hard
+                // timeout, then suppress another normal Flow try.
                 autosrc_last_flow_handover_fail_ms = onekey_now_ms;
+                const char *flow_fail_reason =
+                    flow_handover_sensor_failed ? "Flow handover lost" :
+                    (flow_handover_nav_gap ? "Flow handover nav gap" :
+                     (flow_handover_slow ? "Flow handover slow" :
+                      "Flow handover timeout"));
                 autosrc_select_source(AUTOSRC_GPS_SOURCE_SET,
-                                      flow_handover_sensor_failed ?
-                                      "Flow handover lost" :
-                                      "Flow handover timeout");
+                                      flow_fail_reason);
                 autosrc_transition_start_ms = onekey_now_ms;
                 autosrc_gps_nav_since_ms = 0U;
+                autosrc_gps_handover_gap_since_ms = 0U;
                 autosrc_flow_nav_since_ms = 0U;
+                autosrc_flow_handover_gap_since_ms = 0U;
                 autosrc_state = AutoSourceState::GPS_HANDOVER;
             } else if ((onekey_now_ms - autosrc_transition_start_ms) >=
                        AUTOSRC_FLOW_HANDOVER_TIMEOUT_MS) {
                 // GPS is no longer a safe rollback target. Keep Flow selected
                 // and let the existing recovery/failsafe path own the case.
                 autosrc_last_flow_handover_fail_ms = onekey_now_ms;
+                autosrc_flow_handover_gap_since_ms = 0U;
                 autosrc_state = AutoSourceState::FLOW_RECOVERY;
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
                               "AutoSrc Flow handover slow; GPS unavailable");
@@ -1283,6 +1353,7 @@ void Copter::userhook_50Hz()
                 autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "low-alt Flow");
                 autosrc_transition_start_ms = onekey_now_ms;
                 autosrc_flow_nav_since_ms = 0U;
+                autosrc_flow_handover_gap_since_ms = 0U;
                 autosrc_flow_bad_since_ms = 0U;
                 autosrc_state = AutoSourceState::FLOW_HANDOVER;
             }
