@@ -18,14 +18,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  runner_probe:
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Verify hosted runner starts
-        run: |
-          echo "runner-ok"
-          uname -a
-
   build:
     runs-on: ubuntu-22.04
     container: ardupilot/ardupilot-dev-chibios:v0.1.3
