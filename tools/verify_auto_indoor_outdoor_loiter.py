@@ -214,6 +214,10 @@ for item in [
         raise SystemExit(f"GPS handover fast rollback guard missing: {item}")
 if "(autosrc_active_set == AUTOSRC_GPS_SOURCE_SET)" not in gps_handover_text:
     raise SystemExit("GPS handover completion must verify SRC1 is actually selected")
+if "!autosrc_gps_nav_now" not in gps_handover_text:
+    raise SystemExit("GPS fast rollback must wait for absence of current GPS NAV, not merely incomplete confirmation")
+if "!autosrc_gps_nav_ready" in gps_handover_text[gps_handover_text.index("const bool gps_handover_slow"):gps_handover_text.index("const bool gps_handover_slow")+300]:
+    raise SystemExit("GPS fast rollback may abort a progressing handover before NAV confirmation completes")
 
 # Normal healthy GPS->Flow is now intentionally enabled below 1.7 m, with
 # Flow readiness, low speed, minimum residence and a retry cooldown.
@@ -283,6 +287,11 @@ for item in [
 ]:
     if item not in flow_handover_text:
         raise SystemExit(f"Flow handover fast rollback guard missing: {item}")
+if "!flow_nav_now" not in flow_handover_text:
+    raise SystemExit("Flow fast rollback must wait for absence of current Flow NAV, not merely incomplete confirmation")
+slow_i = flow_handover_text.index("const bool flow_handover_slow")
+if "!flow_nav_confirmed" in flow_handover_text[slow_i:slow_i+300]:
+    raise SystemExit("Flow fast rollback may abort a progressing handover before NAV confirmation completes")
 
 # Emergency FLOW_RECOVERY uses the same source-set + relative-navigation
 # completion principle so retained GPS capability flags cannot leave recovery
