@@ -21,8 +21,11 @@ required = [
     "#define AUTOSRC_GPS_RAW_HOLD_MS 3000U",
     "#define AUTOSRC_GPS_NAV_CONFIRM_MS 1000U",
     "#define AUTOSRC_GPS_HANDOVER_TIMEOUT_MS 5000U",
-    "#define AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS 15000U",
+    "#define AUTOSRC_GPS_HANDOVER_FAST_ROLLBACK_MS 2500U",
     "#define AUTOSRC_FLOW_HANDOVER_TIMEOUT_MS 5000U",
+    "#define AUTOSRC_FLOW_HANDOVER_FAST_ROLLBACK_MS 2500U",
+    "#define AUTOSRC_HANDOVER_NAV_GAP_HOLD_MS 300U",
+    "#define AUTOSRC_GPS_HANDOVER_RETRY_COOLDOWN_MS 15000U",
     "#define AUTOSRC_FLOW_HANDOVER_RETRY_COOLDOWN_MS 15000U",
     "#define AUTOSRC_FLOW_NAV_CONFIRM_MS 500U",
     "#define AUTOSRC_NORMAL_SOURCE_MIN_RESIDENCE_MS 5000U",
@@ -189,6 +192,29 @@ for item in [
     if item not in gate_text:
         raise SystemExit(f"normal GPS handover gate missing: {item}")
 
+# Bidirectional handover failure protection must not wait blindly for the
+# 5-second hard timeout.  A sustained horizontal-navigation gap or a 2.5-second
+# acquisition delay rolls back early, but only when the previous source is
+# still a safe fallback.
+gps_handover_i = user.index("} else if (autosrc_state == AutoSourceState::GPS_HANDOVER)")
+gps_handover_text = user[gps_handover_i:gps_handover_i+5200]
+for item in [
+    "gps_handover_has_horizontal_nav",
+    "autosrc_gps_handover_gap_since_ms",
+    "AUTOSRC_HANDOVER_NAV_GAP_HOLD_MS",
+    "AUTOSRC_GPS_HANDOVER_FAST_ROLLBACK_MS",
+    "gps_handover_nav_gap",
+    "gps_handover_slow",
+    "autosrc_flow_air_ready",
+    '"GPS handover nav gap"',
+    '"GPS handover slow"',
+    "AUTOSRC_GPS_HANDOVER_TIMEOUT_MS",
+]:
+    if item not in gps_handover_text:
+        raise SystemExit(f"GPS handover fast rollback guard missing: {item}")
+if "(autosrc_active_set == AUTOSRC_GPS_SOURCE_SET)" not in gps_handover_text:
+    raise SystemExit("GPS handover completion must verify SRC1 is actually selected")
+
 # Normal healthy GPS->Flow is now intentionally enabled below 1.7 m, with
 # Flow readiness, low speed, minimum residence and a retry cooldown.
 flow_gate_i = user.index("const bool normal_flow_gate")
@@ -238,6 +264,25 @@ for forbidden in [
 ]:
     if forbidden in flow_handover_text:
         raise SystemExit(f"Flow handover is still over-constrained: {forbidden}")
+
+# The reverse GPS->Flow normal handover has symmetric fast-failure protection:
+# a sustained no-navigation gap, Flow sensor loss or a 2.5-second acquisition
+# delay rolls back to GPS only while raw GPS remains viable.
+for item in [
+    "flow_handover_has_horizontal_nav",
+    "autosrc_flow_handover_gap_since_ms",
+    "AUTOSRC_HANDOVER_NAV_GAP_HOLD_MS",
+    "AUTOSRC_FLOW_HANDOVER_FAST_ROLLBACK_MS",
+    "flow_handover_nav_gap",
+    "flow_handover_slow",
+    "flow_handover_sensor_failed",
+    "autosrc_gps_raw_ready",
+    '"Flow handover nav gap"',
+    '"Flow handover slow"',
+    "AUTOSRC_FLOW_HANDOVER_TIMEOUT_MS",
+]:
+    if item not in flow_handover_text:
+        raise SystemExit(f"Flow handover fast rollback guard missing: {item}")
 
 # Emergency FLOW_RECOVERY uses the same source-set + relative-navigation
 # completion principle so retained GPS capability flags cannot leave recovery
