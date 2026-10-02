@@ -1165,7 +1165,7 @@ void Copter::userhook_50Hz()
             const bool gps_handover_slow =
                 ((onekey_now_ms - autosrc_transition_start_ms) >=
                  AUTOSRC_GPS_HANDOVER_FAST_ROLLBACK_MS) &&
-                !autosrc_gps_nav_ready;
+                !autosrc_gps_nav_now;
 
             if ((autosrc_active_set == AUTOSRC_GPS_SOURCE_SET) &&
                 autosrc_gps_nav_ready) {
@@ -1259,7 +1259,7 @@ void Copter::userhook_50Hz()
             const bool flow_handover_slow =
                 ((onekey_now_ms - autosrc_transition_start_ms) >=
                  AUTOSRC_FLOW_HANDOVER_FAST_ROLLBACK_MS) &&
-                !flow_nav_confirmed;
+                !flow_nav_now;
 
             if (flow_nav_confirmed) {
                 if (flightmode == &mode_loiter) {
