@@ -92,6 +92,23 @@
 #define LOWALT_PREDICT_MIN_ACCEL_CMSS 50.0f
 #define LOWALT_PREDICT_MAX_TRIGGER_CM 100.0f
 
+// Outdoor Home stabilisation for the product build.
+// This is deliberately NOT an arming-quality gate: when a 3D GPS position is
+// available, keep only the most recent five seconds of raw GPS XY samples.
+// If an average exists at arm time it replaces Home XY and remains updateable
+// during the landed motor-idle period.  It is frozen before OneKey Takeoff
+// starts (or at native liftoff for other arming paths).  Indoor Flow-only
+// operation therefore retains the original arming behaviour unchanged.
+#if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
+#define GPS_HOME_AVERAGE_ENABLED 1
+#else
+#define GPS_HOME_AVERAGE_ENABLED 0
+#endif
+#define GPS_HOME_AVG_WINDOW_MS 5000U
+#define GPS_HOME_AVG_SAMPLE_PERIOD_MS 200U
+#define GPS_HOME_AVG_MAX_SAMPLES 32U
+#define GPS_HOME_AVG_MIN_SAMPLES 5U
+
 namespace {
 
 enum class OneKeyTakeoffState : uint8_t {
@@ -114,6 +131,115 @@ static OneKeyTakeoffState onekey_takeoff_state = OneKeyTakeoffState::IDLE;
 static uint32_t onekey_takeoff_phase_start_ms = 0U;
 static uint32_t onekey_liftoff_above_since_ms = 0U;
 static float onekey_pending_takeoff_alt_cm = 0.0f;
+
+#if GPS_HOME_AVERAGE_ENABLED
+struct GpsHomeSample {
+    uint32_t time_ms;
+    int32_t lat;
+    int32_t lng;
+};
+
+static GpsHomeSample gps_home_samples[GPS_HOME_AVG_MAX_SAMPLES];
+static uint8_t gps_home_sample_head = 0U;   // next write index
+static uint8_t gps_home_sample_count = 0U;
+static int64_t gps_home_lat_sum = 0;
+static int64_t gps_home_lng_sum = 0;
+static uint32_t gps_home_last_sample_ms = 0U;
+static bool gps_home_session_active = false;
+static bool gps_home_frozen = false;
+
+static void gps_home_average_clear_internal()
+{
+    gps_home_sample_head = 0U;
+    gps_home_sample_count = 0U;
+    gps_home_lat_sum = 0;
+    gps_home_lng_sum = 0;
+    gps_home_last_sample_ms = 0U;
+}
+
+static uint8_t gps_home_oldest_index()
+{
+    return uint8_t((uint16_t(gps_home_sample_head) +
+                    GPS_HOME_AVG_MAX_SAMPLES -
+                    gps_home_sample_count) %
+                   GPS_HOME_AVG_MAX_SAMPLES);
+}
+
+static void gps_home_remove_oldest()
+{
+    if (gps_home_sample_count == 0U) {
+        return;
+    }
+
+    const uint8_t oldest = gps_home_oldest_index();
+    gps_home_lat_sum -= gps_home_samples[oldest].lat;
+    gps_home_lng_sum -= gps_home_samples[oldest].lng;
+    gps_home_sample_count--;
+}
+
+static void gps_home_prune_old_samples(const uint32_t now_ms)
+{
+    while (gps_home_sample_count > 0U) {
+        const uint8_t oldest = gps_home_oldest_index();
+        if ((now_ms - gps_home_samples[oldest].time_ms) <= GPS_HOME_AVG_WINDOW_MS) {
+            break;
+        }
+        gps_home_remove_oldest();
+    }
+}
+
+static void gps_home_collect_sample(const uint32_t now_ms)
+{
+    gps_home_prune_old_samples(now_ms);
+
+    if ((gps_home_last_sample_ms != 0U) &&
+        ((now_ms - gps_home_last_sample_ms) < GPS_HOME_AVG_SAMPLE_PERIOD_MS)) {
+        return;
+    }
+
+    AP_GPS &gps_ref = AP::gps();
+    if (gps_ref.status() < AP_GPS::GPS_OK_FIX_3D) {
+        return;
+    }
+
+    gps_home_last_sample_ms = now_ms;
+    const Location &gps_loc = gps_ref.location();
+
+    if (gps_home_sample_count >= GPS_HOME_AVG_MAX_SAMPLES) {
+        // When full, head points at the oldest entry.
+        gps_home_lat_sum -= gps_home_samples[gps_home_sample_head].lat;
+        gps_home_lng_sum -= gps_home_samples[gps_home_sample_head].lng;
+        gps_home_sample_count--;
+    }
+
+    gps_home_samples[gps_home_sample_head] = {
+        now_ms,
+        gps_loc.lat,
+        gps_loc.lng
+    };
+    gps_home_lat_sum += gps_loc.lat;
+    gps_home_lng_sum += gps_loc.lng;
+    gps_home_sample_head =
+        uint8_t((gps_home_sample_head + 1U) % GPS_HOME_AVG_MAX_SAMPLES);
+    gps_home_sample_count++;
+}
+
+static bool gps_home_get_average(int32_t &lat, int32_t &lng, uint8_t &count)
+{
+    const uint32_t now_ms = AP_HAL::millis();
+    gps_home_prune_old_samples(now_ms);
+
+    if (gps_home_sample_count < GPS_HOME_AVG_MIN_SAMPLES) {
+        count = gps_home_sample_count;
+        return false;
+    }
+
+    count = gps_home_sample_count;
+    lat = int32_t(gps_home_lat_sum / int64_t(gps_home_sample_count));
+    lng = int32_t(gps_home_lng_sum / int64_t(gps_home_sample_count));
+    return true;
+}
+#endif
 
 #if LOWALT_THROTTLE_LAND_ENABLED
 enum class LowAltLandingState : uint8_t {
@@ -216,6 +342,113 @@ bool Copter::product_land_stick_locked() const
     return product_land_stick_lock;
 #else
     return false;
+#endif
+}
+
+bool Copter::gps_home_prepare_for_arm()
+{
+#if GPS_HOME_AVERAGE_ENABLED
+    int32_t avg_lat = 0;
+    int32_t avg_lng = 0;
+    uint8_t sample_count = 0U;
+    if (!gps_home_get_average(avg_lat, avg_lng, sample_count)) {
+        gps_home_session_active = false;
+        gps_home_frozen = false;
+        return false;
+    }
+
+    AP_AHRS &ahrs_ref = AP::ahrs();
+    Location home_loc;
+    if (ahrs_ref.home_is_set()) {
+        // Preserve the already-established takeoff altitude; only XY is
+        // replaced by the raw-GPS rolling average.
+        home_loc = ahrs_ref.get_home();
+    } else if (!ahrs_ref.get_location(home_loc)) {
+        gps_home_session_active = false;
+        gps_home_frozen = false;
+        return false;
+    }
+
+    home_loc.lat = avg_lat;
+    home_loc.lng = avg_lng;
+    if (!set_home(home_loc, false)) {
+        gps_home_session_active = false;
+        gps_home_frozen = false;
+        return false;
+    }
+
+    gps_home_session_active = true;
+    gps_home_frozen = false;
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GPS Home avg active n%u",
+                  unsigned(sample_count));
+    return true;
+#else
+    return false;
+#endif
+}
+
+void Copter::gps_home_ground_update()
+{
+#if GPS_HOME_AVERAGE_ENABLED
+    const uint32_t now_ms = AP_HAL::millis();
+
+    // Never admit airborne motion into the Home average. For manual/non-OneKey
+    // takeoff paths, land_complete becoming false is the fallback freeze edge.
+    if (!ap.land_complete) {
+        if (motors->armed() && gps_home_session_active && !gps_home_frozen) {
+            gps_home_freeze_for_flight();
+        }
+        return;
+    }
+
+    if (gps_home_frozen) {
+        return;
+    }
+
+    // Collect raw GPS XY while physically landed, both before arming and
+    // during the one-second armed idle hold.
+    gps_home_collect_sample(now_ms);
+
+    if (!motors->armed() || !gps_home_session_active) {
+        return;
+    }
+
+    int32_t avg_lat = 0;
+    int32_t avg_lng = 0;
+    uint8_t sample_count = 0U;
+    if (!gps_home_get_average(avg_lat, avg_lng, sample_count)) {
+        return;
+    }
+
+    AP_AHRS &ahrs_ref = AP::ahrs();
+    if (!ahrs_ref.home_is_set()) {
+        return;
+    }
+
+    Location home_loc = ahrs_ref.get_home();
+    home_loc.lat = avg_lat;
+    home_loc.lng = avg_lng;
+    (void)set_home(home_loc, false);
+#endif
+}
+
+void Copter::gps_home_freeze_for_flight()
+{
+#if GPS_HOME_AVERAGE_ENABLED
+    if (gps_home_session_active && !gps_home_frozen) {
+        gps_home_frozen = true;
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GPS Home frozen for flight");
+    }
+#endif
+}
+
+void Copter::gps_home_reset_after_disarm()
+{
+#if GPS_HOME_AVERAGE_ENABLED
+    gps_home_session_active = false;
+    gps_home_frozen = false;
+    gps_home_average_clear_internal();
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GPS Home avg reset");
 #endif
 }
 
@@ -444,10 +677,10 @@ bool Copter::autosrc_takeoff_ready()
 #define GIMBAL_RC_MAX_VALID_PWM 2200U
 
 // Hardware carrier and short-period density modulation. During the ON window
-// only the requested direction receives 15% hardware PWM; during the OFF
+// only the requested direction receives 20% hardware PWM; during the OFF
 // window both RZ7889 inputs are held at 0%.
 #define GIMBAL_HW_PWM_FREQUENCY_HZ 1000U
-#define GIMBAL_MANUAL_DUTY_PERCENT 15U
+#define GIMBAL_MANUAL_DUTY_PERCENT 20U
 #define GIMBAL_DENSITY_ON_MS 10U
 #define GIMBAL_DENSITY_OFF_MS 50U
 #define GIMBAL_DENSITY_PERIOD_MS (GIMBAL_DENSITY_ON_MS + GIMBAL_DENSITY_OFF_MS)
@@ -781,7 +1014,7 @@ void Copter::userhook_init()
 
     gimbal_hw_pwm_ready = true;
     gimbal_apply_hardware_pwm();
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Gimbal HW PWM: 1000Hz 15%%, density 10/50ms");
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Gimbal HW PWM: 1000Hz 20%%, density 10/50ms");
     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Gimbal auto-home: OFF");
 #endif
 }
@@ -802,6 +1035,11 @@ void Copter::userhook_FastLoop()
 void Copter::userhook_50Hz()
 {
     const uint32_t onekey_now_ms = AP_HAL::millis();
+
+    // Maintain the five-second raw-GPS XY rolling window while landed. If an
+    // averaged Home was selected at arming, the same window may refine Home
+    // during the motor-idle hold but never after Takeoff starts.
+    gps_home_ground_update();
 
 #if LOWALT_THROTTLE_LAND_ENABLED
     // Product-triggered LAND returns to the product's single normal standby
@@ -1508,6 +1746,7 @@ void Copter::userhook_50Hz()
                 onekey_reset_takeoff_state();
                 GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "OneKey TO failed: takeoff start");
             } else {
+                gps_home_freeze_for_flight();
                 onekey_takeoff_state = OneKeyTakeoffState::WAIT_LIFTOFF;
                 onekey_takeoff_phase_start_ms = onekey_now_ms;
                 onekey_liftoff_above_since_ms = 0U;

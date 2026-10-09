@@ -743,6 +743,12 @@ bool AP_Arming_Copter::arm(const AP_Arming::Method method, const bool do_arming_
 
     copter.initial_armed_bearing = ahrs.yaw_sensor;
 
+    // If a recent raw-GPS rolling average is available, use it for Home XY.
+    // This is optional and never blocks Flow-only indoor arming. A successful
+    // result also tells the native unlocked-Home path below not to overwrite
+    // the averaged XY with the currently selected EKF source at this arm.
+    const bool gps_home_preserve_on_arm = copter.gps_home_prepare_for_arm();
+
     if (!ahrs.home_is_set()) {
         // Reset EKF altitude if home hasn't been set yet (we use EKF altitude as substitute for alt above home)
         ahrs.resetHeightDatum();
@@ -751,9 +757,13 @@ bool AP_Arming_Copter::arm(const AP_Arming::Method method, const bool do_arming_
         // we have reset height, so arming height is zero
         copter.arming_altitude_m = 0;
     } else if (!ahrs.home_is_locked()) {
-        // Reset home position if it has already been set before (but not locked)
-        if (!copter.set_home_to_current_location(false)) {
-            // ignore failure
+        // Baseline ArduCopter refreshes unlocked Home from the active EKF
+        // source here. Preserve the averaged GPS Home for this arm instead;
+        // otherwise keep the exact native behaviour.
+        if (!gps_home_preserve_on_arm) {
+            if (!copter.set_home_to_current_location(false)) {
+                // ignore failure
+            }
         }
 
         // remember the height when we armed
@@ -857,6 +867,11 @@ bool AP_Arming_Copter::disarm(const AP_Arming::Method method, bool do_disarm_che
 
     // send disarm command to motors
     copter.motors->armed(false);
+
+    // A new sortie must never inherit the previous GPS averaging window or
+    // per-flight Home-freeze state. Fresh landed samples will begin filling
+    // the rolling window again on subsequent 50Hz hooks.
+    copter.gps_home_reset_after_disarm();
 
 #if MODE_AUTO_ENABLED == ENABLED
     // reset the mission

@@ -968,6 +968,10 @@ private:
     // UserCode.cpp
     void userhook_init();
     bool autosrc_takeoff_ready();
+    bool gps_home_prepare_for_arm();
+    void gps_home_ground_update();
+    void gps_home_freeze_for_flight();
+    void gps_home_reset_after_disarm();
     void low_alt_landing_guard(float &target_climb_rate);
     void low_alt_landing_guard_reset();
     bool product_land_stick_locked() const;
