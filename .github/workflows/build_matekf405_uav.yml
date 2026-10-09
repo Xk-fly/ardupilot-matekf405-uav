@@ -8,6 +8,7 @@ on:
       - feature/rc8-onekey-rc7-gimbal
       - feature/auto-indoor-outdoor-loiter
       - feature/bidirectional-auto-flow-gps
+      - feature/gps-home-freeze-gimbal20
   workflow_dispatch:
 
 permissions:

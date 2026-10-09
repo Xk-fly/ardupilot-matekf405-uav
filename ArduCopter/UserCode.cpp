@@ -359,16 +359,20 @@ bool Copter::gps_home_prepare_for_arm()
 
     AP_AHRS &ahrs_ref = AP::ahrs();
     Location home_loc;
-    if (ahrs_ref.home_is_set()) {
-        // Preserve the already-established takeoff altitude; only XY is
-        // replaced by the raw-GPS rolling average.
-        home_loc = ahrs_ref.get_home();
-    } else if (!ahrs_ref.get_location(home_loc)) {
-        gps_home_session_active = false;
-        gps_home_frozen = false;
-        return false;
+    if (!ahrs_ref.get_location(home_loc)) {
+        if (ahrs_ref.home_is_set()) {
+            // Fallback only: normally get_location supplies the current
+            // EKF/Baro-consistent altitude at arming.
+            home_loc = ahrs_ref.get_home();
+        } else {
+            gps_home_session_active = false;
+            gps_home_frozen = false;
+            return false;
+        }
     }
 
+    // Replace horizontal position only. Keep the current EKF/Baro-consistent
+    // altitude so raw GPS vertical noise never enters the averaging scheme.
     home_loc.lat = avg_lat;
     home_loc.lng = avg_lng;
     if (!set_home(home_loc, false)) {
