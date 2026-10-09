@@ -432,7 +432,10 @@ void Copter::gps_home_ground_update()
     Location home_loc = ahrs_ref.get_home();
     home_loc.lat = avg_lat;
     home_loc.lng = avg_lng;
-    (void)set_home(home_loc, false);
+    if (!set_home(home_loc, false)) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                      "GPS Home idle update failed");
+    }
 #endif
 }
 
