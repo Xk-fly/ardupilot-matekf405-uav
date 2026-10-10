@@ -280,6 +280,7 @@ static uint32_t ground_prep_stage_ms = 0U;
 static uint32_t ground_prep_nav_since_ms = 0U;
 static uint8_t ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
 static bool ground_prep_onekey = false;
+static bool ground_prep_config_valid = false;
 static float ground_prep_z_start_cm = 0.0f;
 static float ground_prep_baro_start_cm = 0.0f;
 static uint32_t ground_prep_last_status_ms = 0U;
@@ -646,8 +647,11 @@ void Copter::takeoff_prep_request(const bool from_onekey)
     if (motors->armed() || !ap.land_complete || flightmode != &mode_loiter) {
         return;
     }
-    if (ground_prep_state == GroundPrepState::STANDBY ||
+    if (!ground_prep_config_valid ||
         ground_prep_state == GroundPrepState::FAILED) {
+        return;
+    }
+    if (ground_prep_state == GroundPrepState::STANDBY) {
         ground_prep_state = GroundPrepState::SELECT;
         ground_prep_stage_ms = AP_HAL::millis();
         ground_prep_nav_since_ms = 0U;
@@ -660,6 +664,24 @@ void Copter::takeoff_prep_request(const bool from_onekey)
     }
 #else
     (void)from_onekey;
+#endif
+}
+
+void Copter::takeoff_prep_manual_release()
+{
+#if AUTO_SOURCE_MANAGER_ENABLED
+    if (!motors->armed() && !ground_prep_onekey) {
+        takeoff_prep_reset();
+    }
+#endif
+}
+
+bool Copter::takeoff_prep_failed() const
+{
+#if AUTO_SOURCE_MANAGER_ENABLED
+    return ground_prep_state == GroundPrepState::FAILED;
+#else
+    return false;
 #endif
 }
 
@@ -691,7 +713,8 @@ bool Copter::autosrc_takeoff_ready()
     const uint8_t source_set = AP::ahrs().get_posvelyaw_source_set();
     const nav_filter_status filter = inertial_nav.get_filter_status();
 
-    if ((ground_prep_state != GroundPrepState::READY) ||
+    if (!ground_prep_config_valid ||
+        (ground_prep_state != GroundPrepState::READY) ||
         !takeoff_prep_vertical_ready() ||
         (source_set != ground_prep_chosen_source)) {
         return false;
@@ -1046,6 +1069,7 @@ void Copter::userhook_init()
         AP_Param::set_and_save_by_name_ifchanged("EK3_SRC3_POSZ", 1.0f) &&
         AP_Param::set_and_save_by_name_ifchanged("EK3_SRC3_VELZ", 0.0f) &&
         AP_Param::set_and_save_by_name_ifchanged("EK3_SRC3_YAW", 1.0f);
+    ground_prep_config_valid = standby_config_ok;
     if (!standby_config_ok) {
         GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "GroundPrep SRC3 config failed");
         ground_prep_state = GroundPrepState::FAILED;
@@ -1771,7 +1795,10 @@ void Copter::userhook_50Hz()
 
     // ---------- one-key takeoff / landing ----------
     if (onekey_takeoff_state == OneKeyTakeoffState::WAIT_POSITION) {
-        if (motors->armed() || arming.is_armed()) {
+        if (takeoff_prep_failed()) {
+            onekey_reset_takeoff_state();
+            GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "OneKey TO denied: ground prep failed");
+        } else if (motors->armed() || arming.is_armed()) {
             onekey_reset_takeoff_state();
             GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO cancelled: unexpectedly armed");
         } else if (!ap.land_complete) {
@@ -1948,6 +1975,17 @@ void Copter::userhook_50Hz()
             }
         }
     }
+
+#if AUTO_SOURCE_MANAGER_ENABLED
+    // A cancelled/expired OneKey request must restore SRC3 on the next
+    // unarmed ground hook, rather than leaving an abandoned GPS/Flow source
+    // and resuming disarmed chatter.
+    if (!motors->armed() && ap.land_complete &&
+        ground_prep_onekey &&
+        (onekey_takeoff_state == OneKeyTakeoffState::IDLE)) {
+        takeoff_prep_reset();
+    }
+#endif
 
     static uint32_t init_time_ms = AP_HAL::millis();
     static uint32_t last_toggle_time_ms = 0;

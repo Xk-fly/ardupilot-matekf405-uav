@@ -9,6 +9,7 @@ on:
       - feature/auto-indoor-outdoor-loiter
       - feature/bidirectional-auto-flow-gps
       - feature/gps-home-freeze-gimbal20
+      - feature/ground-standby-vertical-safety
   workflow_dispatch:
 
 permissions:

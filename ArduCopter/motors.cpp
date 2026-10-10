@@ -85,6 +85,12 @@ void Copter::arm_motors_check()
 
     // Yaw is centered so reset arming counter
     } else {
+#if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
+        // Manual preparation must not remain active after stick release.
+        if (!motors->armed()) {
+            takeoff_prep_manual_release();
+        }
+#endif
         arming_counter = 0;
     }
 }
