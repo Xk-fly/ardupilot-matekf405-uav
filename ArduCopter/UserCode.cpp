@@ -286,7 +286,6 @@ static bool ground_prep_onekey = false;
 static bool ground_prep_config_valid = false;
 static float ground_prep_z_start_cm = 0.0f;
 static float ground_prep_baro_start_cm = 0.0f;
-static uint32_t ground_prep_last_status_ms = 0U;
 
 enum class AutoSourceState : uint8_t {
     INIT = 0,
@@ -314,8 +313,6 @@ static uint32_t autosrc_last_handover_fail_ms = 0U;
 static uint32_t autosrc_last_flow_handover_fail_ms = 0U;
 static uint32_t autosrc_last_successful_handover_ms = 0U;
 static uint32_t autosrc_flow_nav_since_ms = 0U;
-static uint32_t autosrc_flow_ground_selected_ms = 0U;
-static bool autosrc_flow_ground_suppressed = false;
 static float autosrc_baro_ground_ref_cm = 0.0f;
 static bool autosrc_baro_ground_ref_valid = false;
 static uint32_t autosrc_baro_ground_track_since_ms = 0U;
