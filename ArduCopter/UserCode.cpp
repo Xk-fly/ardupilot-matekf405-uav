@@ -439,7 +439,8 @@ void Copter::gps_home_freeze_for_flight()
     if (gps_home_session_active && !gps_home_frozen) {
         // Last one-shot XY update on the landed Takeoff boundary.  Home.alt
         // is copied unchanged from native Home; no GPS/EKF Z enters here.
-        if (ap.land_complete && AP::ahrs().home_is_set()) {
+        if (ap.land_complete && AP::ahrs().home_is_set() &&
+            !AP::ahrs().home_is_locked()) {
             int32_t lat = 0;
             int32_t lng = 0;
             uint8_t count = 0U;
@@ -1408,7 +1409,12 @@ void Copter::userhook_50Hz()
 
         if (ground_prep_state == GroundPrepState::STANDBY ||
             ground_prep_state == GroundPrepState::FAILED) {
-            autosrc_select_source(AUTOSRC_STANDBY_SOURCE_SET, "ground standby");
+            // A missing/failed SRC3 configuration must never select the old
+            // experimental rangefinder-Z source.  All Loiter arming remains
+            // blocked until the configuration is repaired.
+            if (ground_prep_config_valid) {
+                autosrc_select_source(AUTOSRC_STANDBY_SOURCE_SET, "ground standby");
+            }
             autosrc_state = AutoSourceState::INIT;
         } else if (ground_prep_state == GroundPrepState::SELECT) {
             const uint8_t chosen =
@@ -1459,6 +1465,9 @@ void Copter::userhook_50Hz()
             const float db = float(baro_alt) - ground_prep_baro_start_cm;
             const bool vertical_ok =
                 barometer.healthy() &&
+                // Reset must establish an actual near-zero local datum;
+                // a stable but still -10m EKF estimate is NOT Ready.
+                (fabsf(inertial_nav.get_position_z_up_cm()) <= 100.0f) &&
                 (fabsf(inertial_nav.get_velocity_z_up_cms()) <=
                  AUTOSRC_PREP_MAX_VZ_CMS) &&
                 (fabsf(dz) <= AUTOSRC_PREP_MAX_Z_DRIFT_CM) &&
