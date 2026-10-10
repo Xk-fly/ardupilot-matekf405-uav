@@ -37,6 +37,7 @@
 #define AUTOSRC_STANDBY_SOURCE_SET 2U
 #define AUTOSRC_PREP_NAV_HOLD_MS 600U
 #define AUTOSRC_PREP_NAV_TIMEOUT_MS 8000U
+#define AUTOSRC_PREP_Z_OUTPUT_SETTLE_MS 300U
 #define AUTOSRC_PREP_Z_HOLD_MS 2000U
 #define AUTOSRC_PREP_Z_TIMEOUT_MS 5000U
 #define AUTOSRC_PREP_MAX_VZ_CMS 25.0f
@@ -278,6 +279,7 @@ enum class GroundPrepState : uint8_t {
 static GroundPrepState ground_prep_state = GroundPrepState::STANDBY;
 static uint32_t ground_prep_stage_ms = 0U;
 static uint32_t ground_prep_nav_since_ms = 0U;
+static uint32_t ground_prep_z_eval_since_ms = 0U;
 static bool ground_prep_flow_fallback_used = false;
 static uint8_t ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
 static bool ground_prep_onekey = false;
@@ -663,6 +665,7 @@ void Copter::takeoff_prep_request(const bool from_onekey)
         ground_prep_state = GroundPrepState::SELECT;
         ground_prep_stage_ms = AP_HAL::millis();
         ground_prep_nav_since_ms = 0U;
+        ground_prep_z_eval_since_ms = 0U;
         ground_prep_flow_fallback_used = false;
         ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
         ground_prep_onekey = from_onekey;
@@ -700,6 +703,7 @@ void Copter::takeoff_prep_reset()
     ground_prep_state = GroundPrepState::STANDBY;
     ground_prep_stage_ms = 0U;
     ground_prep_nav_since_ms = 0U;
+    ground_prep_z_eval_since_ms = 0U;
     ground_prep_flow_fallback_used = false;
     ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
     ground_prep_onekey = false;
@@ -1459,8 +1463,7 @@ void Copter::userhook_50Hz()
                 } else {
                     ground_prep_state = GroundPrepState::VERIFY_Z;
                     ground_prep_stage_ms = onekey_now_ms;
-                    ground_prep_z_start_cm = inertial_nav.get_position_z_up_cm();
-                    ground_prep_baro_start_cm = float(baro_alt);
+                    ground_prep_z_eval_since_ms = 0U;
                     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GroundPrep height reset OK");
                 }
             } else if (ground_prep_chosen_source == AUTOSRC_FLOW_SOURCE_SET &&
@@ -1482,6 +1485,17 @@ void Copter::userhook_50Hz()
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "GroundPrep nav timeout");
             }
         } else if (ground_prep_state == GroundPrepState::VERIFY_Z) {
+            // The EKF output predictor can lag its reset state.  Permit a
+            // short propagation period, then start a fresh 2s window using
+            // the synchronised values.  Never count the settle time as READY.
+            if (onekey_now_ms - ground_prep_stage_ms <
+                AUTOSRC_PREP_Z_OUTPUT_SETTLE_MS) {
+                // Keep waiting with motors disarmed.
+            } else if (ground_prep_z_eval_since_ms == 0U) {
+                ground_prep_z_eval_since_ms = onekey_now_ms;
+                ground_prep_z_start_cm = inertial_nav.get_position_z_up_cm();
+                ground_prep_baro_start_cm = float(baro_alt);
+            } else {
             const float dz = inertial_nav.get_position_z_up_cm() -
                              ground_prep_z_start_cm;
             const float db = float(baro_alt) - ground_prep_baro_start_cm;
@@ -1506,7 +1520,7 @@ void Copter::userhook_50Hz()
             if (!vertical_ok || !nav_ok) {
                 ground_prep_state = GroundPrepState::FAILED;
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "GroundPrep vertical/nav unstable");
-            } else if (onekey_now_ms - ground_prep_stage_ms >=
+            } else if (onekey_now_ms - ground_prep_z_eval_since_ms >=
                        AUTOSRC_PREP_Z_HOLD_MS) {
                 ground_prep_state = GroundPrepState::READY;
                 GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GroundPrep vertical READY");
@@ -1514,6 +1528,7 @@ void Copter::userhook_50Hz()
                        AUTOSRC_PREP_Z_TIMEOUT_MS) {
                 ground_prep_state = GroundPrepState::FAILED;
             }
+            } // post-reset output synchronization completed
         } else if (ground_prep_state == GroundPrepState::READY) {
             // Losing navigation or vertical readiness before ARM invalidates
             // the one-time preparation. Next explicit request starts afresh.
