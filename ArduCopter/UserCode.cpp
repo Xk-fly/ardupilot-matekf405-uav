@@ -715,6 +715,8 @@ bool Copter::takeoff_prep_vertical_ready() const
 #if AUTO_SOURCE_MANAGER_ENABLED
     return (ground_prep_state == GroundPrepState::READY) &&
            barometer.healthy() && ap.land_complete &&
+           // Catch a bad Z jump after ARM but before either type of takeoff.
+           fabsf(inertial_nav.get_position_z_up_cm()) <= 100.0f &&
            fabsf(inertial_nav.get_velocity_z_up_cms()) <= AUTOSRC_PREP_MAX_VZ_CMS;
 #else
     return true;

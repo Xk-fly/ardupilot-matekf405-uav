@@ -147,8 +147,19 @@ void ModeLoiter::run()
         break;
 
     case AltHold_Takeoff:
-        // initiate take-off
+        // Manual throttle takeoff must use the same vertical readiness
+        // contract as RC8.  Only block START, never an ongoing takeoff or
+        // airborne flight, which would introduce a dangerous thrust cut.
         if (!takeoff.running()) {
+#if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
+            if (!copter.takeoff_prep_vertical_ready()) {
+                loiter_nav->init_target();
+                attitude_control->input_thrust_vector_rate_heading(
+                    loiter_nav->get_thrust_vector(), target_yaw_rate, false);
+                pos_control->relax_z_controller(0.0f);
+                break;
+            }
+#endif
             takeoff.start(constrain_float(g.pilot_takeoff_alt,0.0f,1000.0f));
         }
 
