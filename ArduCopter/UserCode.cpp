@@ -278,6 +278,7 @@ enum class GroundPrepState : uint8_t {
 static GroundPrepState ground_prep_state = GroundPrepState::STANDBY;
 static uint32_t ground_prep_stage_ms = 0U;
 static uint32_t ground_prep_nav_since_ms = 0U;
+static bool ground_prep_flow_fallback_used = false;
 static uint8_t ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
 static bool ground_prep_onekey = false;
 static bool ground_prep_config_valid = false;
@@ -656,6 +657,7 @@ void Copter::takeoff_prep_request(const bool from_onekey)
         ground_prep_state = GroundPrepState::SELECT;
         ground_prep_stage_ms = AP_HAL::millis();
         ground_prep_nav_since_ms = 0U;
+        ground_prep_flow_fallback_used = false;
         ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
         ground_prep_onekey = from_onekey;
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GroundPrep requested");
@@ -692,6 +694,7 @@ void Copter::takeoff_prep_reset()
     ground_prep_state = GroundPrepState::STANDBY;
     ground_prep_stage_ms = 0U;
     ground_prep_nav_since_ms = 0U;
+    ground_prep_flow_fallback_used = false;
     ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
     ground_prep_onekey = false;
 #endif
@@ -1454,6 +1457,19 @@ void Copter::userhook_50Hz()
                     ground_prep_baro_start_cm = float(baro_alt);
                     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GroundPrep height reset OK");
                 }
+            } else if (ground_prep_chosen_source == AUTOSRC_FLOW_SOURCE_SET &&
+                       !ground_prep_flow_fallback_used &&
+                       autosrc_gps_raw_ready &&
+                       (onekey_now_ms - ground_prep_stage_ms >= 3000U)) {
+                // Flow can report good raw quality yet fail to establish
+                // relative navigation.  One GPS fallback per user request,
+                // never a periodic or automatic disarmed feedback loop.
+                ground_prep_flow_fallback_used = true;
+                ground_prep_chosen_source = AUTOSRC_GPS_SOURCE_SET;
+                autosrc_select_source(AUTOSRC_GPS_SOURCE_SET, "prep Flow nav timeout");
+                autosrc_state = AutoSourceState::GPS_GROUND;
+                ground_prep_stage_ms = onekey_now_ms;
+                ground_prep_nav_since_ms = 0U;
             } else if (onekey_now_ms - ground_prep_stage_ms >
                        AUTOSRC_PREP_NAV_TIMEOUT_MS) {
                 ground_prep_state = GroundPrepState::FAILED;
