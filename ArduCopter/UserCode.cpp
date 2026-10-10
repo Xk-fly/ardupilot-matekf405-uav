@@ -34,6 +34,13 @@
 #endif
 #define AUTOSRC_GPS_SOURCE_SET 0U
 #define AUTOSRC_FLOW_SOURCE_SET 1U
+#define AUTOSRC_STANDBY_SOURCE_SET 2U
+#define AUTOSRC_PREP_NAV_HOLD_MS 600U
+#define AUTOSRC_PREP_NAV_TIMEOUT_MS 8000U
+#define AUTOSRC_PREP_Z_HOLD_MS 2000U
+#define AUTOSRC_PREP_Z_TIMEOUT_MS 5000U
+#define AUTOSRC_PREP_MAX_VZ_CMS 25.0f
+#define AUTOSRC_PREP_MAX_Z_DRIFT_CM 40.0f
 #define AUTOSRC_GPS_MIN_SATS 6U
 #define AUTOSRC_GPS_MAX_HDOP 250U
 #define AUTOSRC_GPS_RAW_HOLD_MS 3000U
@@ -260,6 +267,23 @@ static bool product_land_return_loiter_pending = false;
 #endif
 
 #if AUTO_SOURCE_MANAGER_ENABLED
+enum class GroundPrepState : uint8_t {
+    STANDBY = 0,
+    SELECT,
+    WAIT_NAV,
+    VERIFY_Z,
+    READY,
+    FAILED
+};
+static GroundPrepState ground_prep_state = GroundPrepState::STANDBY;
+static uint32_t ground_prep_stage_ms = 0U;
+static uint32_t ground_prep_nav_since_ms = 0U;
+static uint8_t ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
+static bool ground_prep_onekey = false;
+static float ground_prep_z_start_cm = 0.0f;
+static float ground_prep_baro_start_cm = 0.0f;
+static uint32_t ground_prep_last_status_ms = 0U;
+
 enum class AutoSourceState : uint8_t {
     INIT = 0,
     FLOW_GROUND,
@@ -358,21 +382,15 @@ bool Copter::gps_home_prepare_for_arm()
     }
 
     AP_AHRS &ahrs_ref = AP::ahrs();
-    Location home_loc;
-    if (!ahrs_ref.get_location(home_loc)) {
-        if (ahrs_ref.home_is_set()) {
-            // Fallback only: normally get_location supplies the current
-            // EKF/Baro-consistent altitude at arming.
-            home_loc = ahrs_ref.get_home();
-        } else {
-            gps_home_session_active = false;
-            gps_home_frozen = false;
-            return false;
-        }
+    // Never construct a Home from EKF Z.  Native arming sets its height datum
+    // first; our enhancement reads the already-established Home and changes
+    // only latitude/longitude.  No Home yet -> leave native operation intact.
+    if (!ahrs_ref.home_is_set()) {
+        gps_home_session_active = false;
+        gps_home_frozen = false;
+        return false;
     }
-
-    // Replace horizontal position only. Keep the current EKF/Baro-consistent
-    // altitude so raw GPS vertical noise never enters the averaging scheme.
+    Location home_loc = ahrs_ref.get_home();
     home_loc.lat = avg_lat;
     home_loc.lng = avg_lng;
     if (!set_home(home_loc, false)) {
@@ -409,33 +427,8 @@ void Copter::gps_home_ground_update()
         return;
     }
 
-    // Collect raw GPS XY while physically landed, both before arming and
-    // during the one-second armed idle hold.
+    // Only collect samples: never rewrite Home at 50Hz on motor idle.
     gps_home_collect_sample(now_ms);
-
-    if (!motors->armed() || !gps_home_session_active) {
-        return;
-    }
-
-    int32_t avg_lat = 0;
-    int32_t avg_lng = 0;
-    uint8_t sample_count = 0U;
-    if (!gps_home_get_average(avg_lat, avg_lng, sample_count)) {
-        return;
-    }
-
-    AP_AHRS &ahrs_ref = AP::ahrs();
-    if (!ahrs_ref.home_is_set()) {
-        return;
-    }
-
-    Location home_loc = ahrs_ref.get_home();
-    home_loc.lat = avg_lat;
-    home_loc.lng = avg_lng;
-    if (!set_home(home_loc, false)) {
-        GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
-                      "GPS Home idle update failed");
-    }
 #endif
 }
 
@@ -443,6 +436,22 @@ void Copter::gps_home_freeze_for_flight()
 {
 #if GPS_HOME_AVERAGE_ENABLED
     if (gps_home_session_active && !gps_home_frozen) {
+        // Last one-shot XY update on the landed Takeoff boundary.  Home.alt
+        // is copied unchanged from native Home; no GPS/EKF Z enters here.
+        if (ap.land_complete && AP::ahrs().home_is_set()) {
+            int32_t lat = 0;
+            int32_t lng = 0;
+            uint8_t count = 0U;
+            if (gps_home_get_average(lat, lng, count)) {
+                Location home = AP::ahrs().get_home();
+                home.lat = lat;
+                home.lng = lng;
+                if (!set_home(home, false)) {
+                    GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                                  "GPS Home final XY failed");
+                }
+            }
+        }
         gps_home_frozen = true;
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GPS Home frozen for flight");
     }
@@ -631,11 +640,62 @@ void Copter::low_alt_landing_guard(float &target_climb_rate)
 #endif
 }
 
+void Copter::takeoff_prep_request(const bool from_onekey)
+{
+#if AUTO_SOURCE_MANAGER_ENABLED
+    if (motors->armed() || !ap.land_complete || flightmode != &mode_loiter) {
+        return;
+    }
+    if (ground_prep_state == GroundPrepState::STANDBY ||
+        ground_prep_state == GroundPrepState::FAILED) {
+        ground_prep_state = GroundPrepState::SELECT;
+        ground_prep_stage_ms = AP_HAL::millis();
+        ground_prep_nav_since_ms = 0U;
+        ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
+        ground_prep_onekey = from_onekey;
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GroundPrep requested");
+    }
+    if (from_onekey) {
+        ground_prep_onekey = true;
+    }
+#else
+    (void)from_onekey;
+#endif
+}
+
+void Copter::takeoff_prep_reset()
+{
+#if AUTO_SOURCE_MANAGER_ENABLED
+    ground_prep_state = GroundPrepState::STANDBY;
+    ground_prep_stage_ms = 0U;
+    ground_prep_nav_since_ms = 0U;
+    ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
+    ground_prep_onekey = false;
+#endif
+}
+
+bool Copter::takeoff_prep_vertical_ready() const
+{
+#if AUTO_SOURCE_MANAGER_ENABLED
+    return (ground_prep_state == GroundPrepState::READY) &&
+           barometer.healthy() && ap.land_complete &&
+           fabsf(inertial_nav.get_velocity_z_up_cms()) <= AUTOSRC_PREP_MAX_VZ_CMS;
+#else
+    return true;
+#endif
+}
+
 bool Copter::autosrc_takeoff_ready()
 {
 #if AUTO_SOURCE_MANAGER_ENABLED
     const uint8_t source_set = AP::ahrs().get_posvelyaw_source_set();
     const nav_filter_status filter = inertial_nav.get_filter_status();
+
+    if ((ground_prep_state != GroundPrepState::READY) ||
+        !takeoff_prep_vertical_ready() ||
+        (source_set != ground_prep_chosen_source)) {
+        return false;
+    }
 
     if (source_set == AUTOSRC_FLOW_SOURCE_SET) {
         // GPS navigation also reports horiz_pos_rel, so require that absolute
@@ -977,7 +1037,22 @@ void Copter::userhook_init()
 #if AUTO_SOURCE_MANAGER_ENABLED
     autosrc_boot_ms = AP_HAL::millis();
     autosrc_state = AutoSourceState::INIT;
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AutoSrc enabled: bidir Flow/GPS");
+    // SRC3 previously served an experimental RangeFinder-Z profile; this
+    // dedicated product build now owns SRC3 as its ground-only no-XY standby.
+    // Save only changed values, then check them below before using SRC3.
+    const bool standby_config_ok =
+        AP_Param::set_and_save_by_name_ifchanged("EK3_SRC3_POSXY", 0.0f) &&
+        AP_Param::set_and_save_by_name_ifchanged("EK3_SRC3_VELXY", 0.0f) &&
+        AP_Param::set_and_save_by_name_ifchanged("EK3_SRC3_POSZ", 1.0f) &&
+        AP_Param::set_and_save_by_name_ifchanged("EK3_SRC3_VELZ", 0.0f) &&
+        AP_Param::set_and_save_by_name_ifchanged("EK3_SRC3_YAW", 1.0f);
+    if (!standby_config_ok) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "GroundPrep SRC3 config failed");
+        ground_prep_state = GroundPrepState::FAILED;
+    } else {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GroundPrep SRC3 standby configured");
+    }
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AutoSrc: ground standby + bidir flight");
 #endif
 
 #if GIMBAL_RZ7889_RC7_CONTROL_ENABLED
@@ -1161,8 +1236,7 @@ void Copter::userhook_50Hz()
         (autosrc_gps_status >= AP_GPS::GPS_OK_FIX_3D) &&
         (autosrc_sats >= AUTOSRC_GPS_MIN_SATS) &&
         (autosrc_hdop > 0U) &&
-        (autosrc_hdop <= AUTOSRC_GPS_MAX_HDOP) &&
-        autosrc_filter.flags.gps_quality_good;
+        (autosrc_hdop <= AUTOSRC_GPS_MAX_HDOP);
 
     const bool autosrc_gps_nav_now =
         autosrc_filter.flags.horiz_pos_abs &&
@@ -1300,56 +1374,107 @@ void Copter::userhook_50Hz()
         (autosrc_last_successful_handover_ms == 0U) ||
         ((onekey_now_ms - autosrc_last_successful_handover_ms) >=
          AUTOSRC_NORMAL_SOURCE_MIN_RESIDENCE_MS);
-    // A failed Flow navigation acquisition is suppressed for the remainder
-    // of the current healthy-ground episode while GPS remains viable. This
-    // prevents periodic Flow/GPS source oscillation before takeoff. A real
-    // Flow/Range drop or loss of GPS viability permits a fresh Flow attempt.
-    if (!autosrc_flow_ground_now || !autosrc_gps_raw_ready) {
-        autosrc_flow_ground_suppressed = false;
-    }
-
-    // On the ground, Flow is the preferred takeoff source whenever it is
-    // healthy. If it is unavailable, a stable GPS solution is the fallback.
+    // No XY aiding is needed while disarmed. Keep SRC3 selected, but keep
+    // collecting independent GPS and Flow health samples in the background.
+    // Only an explicit takeoff request may leave standby.
     if (!motors->armed() && ap.land_complete &&
         ((onekey_now_ms - autosrc_boot_ms) >= AUTOSRC_BOOT_SETTLE_MS)) {
         autosrc_gps_bad_since_ms = 0U;
         autosrc_flow_bad_since_ms = 0U;
 
-        if (autosrc_flow_ground_ready && !autosrc_flow_ground_suppressed) {
-            if (autosrc_active_set != AUTOSRC_FLOW_SOURCE_SET) {
-                autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "Flow takeoff");
-                autosrc_flow_ground_selected_ms = onekey_now_ms;
-            } else if (autosrc_flow_ground_selected_ms == 0U) {
-                autosrc_flow_ground_selected_ms = onekey_now_ms;
+        if (ground_prep_state == GroundPrepState::STANDBY ||
+            ground_prep_state == GroundPrepState::FAILED) {
+            autosrc_select_source(AUTOSRC_STANDBY_SOURCE_SET, "ground standby");
+            autosrc_state = AutoSourceState::INIT;
+        } else if (ground_prep_state == GroundPrepState::SELECT) {
+            const uint8_t chosen =
+                autosrc_flow_ground_ready ? AUTOSRC_FLOW_SOURCE_SET :
+                autosrc_gps_raw_ready ? AUTOSRC_GPS_SOURCE_SET :
+                AUTOSRC_STANDBY_SOURCE_SET;
+            if (chosen != AUTOSRC_STANDBY_SOURCE_SET) {
+                ground_prep_chosen_source = chosen;
+                autosrc_select_source(chosen, "takeoff select");
+                autosrc_state = (chosen == AUTOSRC_FLOW_SOURCE_SET) ?
+                    AutoSourceState::FLOW_GROUND : AutoSourceState::GPS_GROUND;
+                ground_prep_stage_ms = onekey_now_ms;
+                ground_prep_nav_since_ms = 0U;
+                ground_prep_state = GroundPrepState::WAIT_NAV;
             }
-            autosrc_state = AutoSourceState::FLOW_GROUND;
-
-            const bool flow_nav_established =
-                autosrc_filter.flags.horiz_pos_rel &&
-                !autosrc_filter.flags.horiz_pos_abs &&
+        } else if (ground_prep_state == GroundPrepState::WAIT_NAV) {
+            const bool nav_ok =
+                (AP::ahrs().get_posvelyaw_source_set() == ground_prep_chosen_source) &&
+                !autosrc_filter.flags.const_pos_mode &&
+                ((ground_prep_chosen_source == AUTOSRC_GPS_SOURCE_SET) ?
+                    autosrc_gps_nav_now :
+                    (autosrc_filter.flags.horiz_pos_rel &&
+                     !autosrc_filter.flags.horiz_pos_abs &&
+                     autosrc_flow_ground_ready));
+            update_hold(nav_ok, ground_prep_nav_since_ms);
+            if (nav_ok && ground_prep_nav_since_ms != 0U &&
+                (onekey_now_ms - ground_prep_nav_since_ms >= AUTOSRC_PREP_NAV_HOLD_MS)) {
+                // Only while still disarmed and landed. Return false -> fail
+                // closed, never fabricate healthy EKF altitude.
+                if (!barometer.healthy() || !AP::ahrs().resetHeightDatum()) {
+                    ground_prep_state = GroundPrepState::FAILED;
+                    GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "GroundPrep height reset failed");
+                } else {
+                    ground_prep_state = GroundPrepState::VERIFY_Z;
+                    ground_prep_stage_ms = onekey_now_ms;
+                    ground_prep_z_start_cm = inertial_nav.get_position_z_up_cm();
+                    ground_prep_baro_start_cm = float(baro_alt);
+                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GroundPrep height reset OK");
+                }
+            } else if (onekey_now_ms - ground_prep_stage_ms >
+                       AUTOSRC_PREP_NAV_TIMEOUT_MS) {
+                ground_prep_state = GroundPrepState::FAILED;
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "GroundPrep nav timeout");
+            }
+        } else if (ground_prep_state == GroundPrepState::VERIFY_Z) {
+            const float dz = inertial_nav.get_position_z_up_cm() -
+                             ground_prep_z_start_cm;
+            const float db = float(baro_alt) - ground_prep_baro_start_cm;
+            const bool vertical_ok =
+                barometer.healthy() &&
+                (fabsf(inertial_nav.get_velocity_z_up_cms()) <=
+                 AUTOSRC_PREP_MAX_VZ_CMS) &&
+                (fabsf(dz) <= AUTOSRC_PREP_MAX_Z_DRIFT_CM) &&
+                (fabsf(db) <= AUTOSRC_PREP_MAX_Z_DRIFT_CM) &&
+                (fabsf(dz-db) <= AUTOSRC_PREP_MAX_Z_DRIFT_CM);
+            const bool nav_ok =
+                (AP::ahrs().get_posvelyaw_source_set() == ground_prep_chosen_source) &&
+                ((ground_prep_chosen_source == AUTOSRC_GPS_SOURCE_SET) ?
+                    autosrc_gps_nav_now :
+                    (autosrc_filter.flags.horiz_pos_rel &&
+                     autosrc_flow_ground_ready &&
+                     !autosrc_filter.flags.horiz_pos_abs)) &&
                 !autosrc_filter.flags.const_pos_mode;
-            if (flow_nav_established) {
-                autosrc_flow_ground_suppressed = false;
-                // Keep this timestamp at the last known-good Flow navigation
-                // instant. A later transient loss must persist for the full
-                // timeout before GPS fallback is allowed.
-                autosrc_flow_ground_selected_ms = onekey_now_ms;
-            } else if (autosrc_gps_raw_ready &&
-                       (autosrc_flow_ground_selected_ms != 0U) &&
-                       ((onekey_now_ms - autosrc_flow_ground_selected_ms) >=
-                        AUTOSRC_FLOW_GROUND_NAV_TIMEOUT_MS)) {
-                // Avoid a ground deadlock where Flow sensor data looks valid
-                // but EKF relative aiding never becomes usable. Prefer GPS for
-                // this attempt, then allow Flow another try after cooldown.
-                autosrc_select_source(AUTOSRC_GPS_SOURCE_SET, "Flow nav timeout");
-                autosrc_flow_ground_suppressed = true;
-                autosrc_flow_ground_selected_ms = 0U;
-                autosrc_state = AutoSourceState::GPS_GROUND;
+            if (!vertical_ok || !nav_ok) {
+                ground_prep_state = GroundPrepState::FAILED;
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "GroundPrep vertical/nav unstable");
+            } else if (onekey_now_ms - ground_prep_stage_ms >=
+                       AUTOSRC_PREP_Z_HOLD_MS) {
+                ground_prep_state = GroundPrepState::READY;
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GroundPrep vertical READY");
+            } else if (onekey_now_ms - ground_prep_stage_ms >
+                       AUTOSRC_PREP_Z_TIMEOUT_MS) {
+                ground_prep_state = GroundPrepState::FAILED;
             }
-        } else if (autosrc_gps_raw_ready) {
-            autosrc_select_source(AUTOSRC_GPS_SOURCE_SET, "GPS fallback");
-            autosrc_flow_ground_selected_ms = 0U;
-            autosrc_state = AutoSourceState::GPS_GROUND;
+        } else if (ground_prep_state == GroundPrepState::READY) {
+            // Losing navigation or vertical readiness before ARM invalidates
+            // the one-time preparation. Next explicit request starts afresh.
+            const bool source_ok = (ground_prep_chosen_source ==
+                                   AP::ahrs().get_posvelyaw_source_set()) &&
+                                  ((ground_prep_chosen_source == AUTOSRC_GPS_SOURCE_SET) ?
+                                   (autosrc_gps_nav_ready && autosrc_gps_raw_ready) :
+                                   (autosrc_flow_ground_ready &&
+                                    autosrc_filter.flags.horiz_pos_rel &&
+                                    !autosrc_filter.flags.horiz_pos_abs));
+            if (!source_ok || !barometer.healthy() ||
+                fabsf(inertial_nav.get_velocity_z_up_cms()) >
+                    AUTOSRC_PREP_MAX_VZ_CMS) {
+                ground_prep_state = GroundPrepState::FAILED;
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "GroundPrep readiness lost");
+            }
         }
     } else if (motors->armed() && !ap.land_complete) {
         // Normal path uses hysteresis: Flow owns low altitude and GPS owns
@@ -1700,7 +1825,8 @@ void Copter::userhook_50Hz()
                 }
                 onekey_reset_takeoff_state();
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: RC lost before takeoff");
-            } else if (!autosrc_takeoff_ready() || !position_ok()) {
+            } else if (!autosrc_takeoff_ready() || !position_ok() ||
+                       !takeoff_prep_vertical_ready()) {
                 if (ap.land_complete) {
                     (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
                 }
@@ -1733,7 +1859,8 @@ void Copter::userhook_50Hz()
             }
             onekey_reset_takeoff_state();
             GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "OneKey TO abort: RC lost during idle");
-        } else if (!autosrc_takeoff_ready() || !position_ok()) {
+        } else if (!autosrc_takeoff_ready() || !position_ok() ||
+                   !takeoff_prep_vertical_ready()) {
             if (ap.land_complete) {
                 (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
             }
@@ -1919,6 +2046,7 @@ void Copter::userhook_auxSwitch1(const RC_Channel::AuxSwitchPos ch_flag)
         // establish Flow-relative or GPS-absolute position. All normal Loiter
         // and ArduPilot arming checks are still enforced before motors arm.
         onekey_pending_takeoff_alt_cm = takeoff_alt_cm;
+        takeoff_prep_request(true);
         onekey_takeoff_phase_start_ms = AP_HAL::millis();
         onekey_takeoff_state = OneKeyTakeoffState::WAIT_POSITION;
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OneKey queued; waiting position");
@@ -1927,6 +2055,9 @@ void Copter::userhook_auxSwitch1(const RC_Channel::AuxSwitchPos ch_flag)
 
     if (ch_flag == RC_Channel::AuxSwitchPos::LOW) {
         onekey_reset_takeoff_state();
+        if (!motors->armed()) {
+            takeoff_prep_reset();
+        }
         Mode::takeoff_stop();
 
         // Down command is the native LAND mode. Returning the self-centering

@@ -694,7 +694,8 @@ bool AP_Arming_Copter::arm(const AP_Arming::Method method, const bool do_arming_
     // gate. This is deliberately outside ARMING_CHECK so disabling optional
     // checks cannot bypass the automatic Flow/GPS takeoff-source decision.
     if ((method == AP_Arming::Method::RUDDER) ||
-        (method == AP_Arming::Method::AUXSWITCH)) {
+        (method == AP_Arming::Method::AUXSWITCH) ||
+        (copter.flightmode->mode_number() == Mode::Number::LOITER)) {
         if (copter.flightmode->mode_number() != Mode::Number::LOITER) {
             check_failed(true, "AutoSrc requires Loiter");
             AP_Notify::events.arming_failed = true;
@@ -743,31 +744,20 @@ bool AP_Arming_Copter::arm(const AP_Arming::Method method, const bool do_arming_
 
     copter.initial_armed_bearing = ahrs.yaw_sensor;
 
-    // If a recent raw-GPS rolling average is available, use it for Home XY.
-    // This is optional and never blocks Flow-only indoor arming. A successful
-    // result also tells the native unlocked-Home path below not to overwrite
-    // the averaged XY with the currently selected EKF source at this arm.
-    const bool gps_home_preserve_on_arm = copter.gps_home_prepare_for_arm();
-
+    // Native ArduCopter owns Home altitude and its height datum.
+    // The GPS rolling average may *only* adjust XY once native Home exists.
     if (!ahrs.home_is_set()) {
-        // Reset EKF altitude if home hasn't been set yet (we use EKF altitude as substitute for alt above home)
         ahrs.resetHeightDatum();
         LOGGER_WRITE_EVENT(LogEvent::EKF_ALT_RESET);
-
-        // we have reset height, so arming height is zero
         copter.arming_altitude_m = 0;
     } else if (!ahrs.home_is_locked()) {
-        // Baseline ArduCopter refreshes unlocked Home from the active EKF
-        // source here. Preserve the averaged GPS Home for this arm instead;
-        // otherwise keep the exact native behaviour.
-        if (!gps_home_preserve_on_arm) {
-            if (!copter.set_home_to_current_location(false)) {
-                // ignore failure
-            }
+        if (!copter.set_home_to_current_location(false)) {
+            // ignore native refresh failure; required Home still checked
         }
-
-        // remember the height when we armed
         copter.arming_altitude_m = copter.inertial_nav.get_position_z_up_cm() * 0.01;
+    }
+    if (!ahrs.home_is_locked()) {
+        (void)copter.gps_home_prepare_for_arm();
     }
     copter.update_super_simple_bearing(false);
 
@@ -872,6 +862,7 @@ bool AP_Arming_Copter::disarm(const AP_Arming::Method method, bool do_disarm_che
     // per-flight Home-freeze state. Fresh landed samples will begin filling
     // the rolling window again on subsequent 50Hz hooks.
     copter.gps_home_reset_after_disarm();
+    copter.takeoff_prep_reset();
 
 #if MODE_AUTO_ENABLED == ENABLED
     // reset the mission

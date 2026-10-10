@@ -36,6 +36,13 @@ void Copter::arm_motors_check()
 
     // full right
     if (yaw_in > 4000) {
+#if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
+        // Initiate exactly the same preparatory source/Z checks as OneKey.
+        // Native rudder arming continues only after prep reaches READY.
+        if (!motors->armed()) {
+            takeoff_prep_request(false);
+        }
+#endif
 
         // increase the arming counter to a maximum of 1 beyond the auto trim counter
         if (arming_counter <= AUTO_TRIM_DELAY) {
