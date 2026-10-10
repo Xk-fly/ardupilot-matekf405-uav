@@ -490,6 +490,12 @@ void Copter::low_alt_landing_guard(float &target_climb_rate)
     const uint32_t range_sample_ms =
         rangefinder.last_reading_ms(ROTATION_PITCH_270);
     const bool range_fresh =
+        // Reject physically impossible near-ground VL53 echoes when Baro
+        // shows the aircraft is well above the sensor's useful range.
+        autosrc_baro_ground_ref_valid &&
+        barometer.healthy() &&
+        (float(baro_alt) - autosrc_baro_ground_ref_cm < 300.0f) &&
+        (float(baro_alt) - autosrc_baro_ground_ref_cm > -100.0f) &&
         rangefinder_alt_ok() &&
         (range_sample_ms != 0U) &&
         ((now_ms - range_sample_ms) <= LOWALT_RANGE_FRESH_MS);
@@ -1978,8 +1984,17 @@ void Copter::userhook_50Hz()
                 // <=8 cm means the vehicle is still physically on/very near
                 // the ground. Do not let barometer/EKF-Z drift veto this check.
                 // If range is unavailable, never risk an airborne auto-disarm.
+                const bool baro_still_grounded =
+                    autosrc_baro_ground_ref_valid &&
+                    barometer.healthy() &&
+                    (fabsf(float(baro_alt) - autosrc_baro_ground_ref_cm) <= 25.0f);
+                const bool range_is_fresh =
+                    (rangefinder.last_reading_ms(ROTATION_PITCH_270) != 0U) &&
+                    (onekey_now_ms -
+                     rangefinder.last_reading_ms(ROTATION_PITCH_270) <=
+                     LOWALT_RANGE_FRESH_MS);
                 const bool definitely_not_lifted =
-                    range_valid &&
+                    range_valid && range_is_fresh && baro_still_grounded &&
                     (range_alt_cm <= int32_t(ONEKEY_LIFTOFF_ABORT_MAX_CM));
 
                 if (definitely_not_lifted) {
