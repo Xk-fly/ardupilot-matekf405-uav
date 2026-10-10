@@ -1927,12 +1927,15 @@ void Copter::userhook_50Hz()
             onekey_reset_takeoff_state();
             GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "OneKey TO abort: motor spool lost during idle");
         } else if ((onekey_now_ms - onekey_takeoff_phase_start_ms) >= ONEKEY_IDLE_HOLD_MS) {
+            // Finalise the five-second Home XY average BEFORE the native
+            // takeoff command, not after the mode may clear land_complete.
+            // On failed takeoff the existing landed disarm clears this state.
+            gps_home_freeze_for_flight();
             if (!mode_loiter.do_user_takeoff_relative(onekey_pending_takeoff_alt_cm, true)) {
                 (void)arming.disarm(AP_Arming::Method::AUXSWITCH, false);
                 onekey_reset_takeoff_state();
                 GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "OneKey TO failed: takeoff start");
             } else {
-                gps_home_freeze_for_flight();
                 onekey_takeoff_state = OneKeyTakeoffState::WAIT_LIFTOFF;
                 onekey_takeoff_phase_start_ms = onekey_now_ms;
                 onekey_liftoff_above_since_ms = 0U;
