@@ -969,6 +969,8 @@ private:
     void userhook_init();
     bool autosrc_takeoff_ready();
     void takeoff_prep_request(bool from_onekey);
+    void takeoff_prep_manual_release();
+    bool takeoff_prep_failed() const;
     void takeoff_prep_reset();
     bool takeoff_prep_vertical_ready() const;
     bool gps_home_prepare_for_arm();
