@@ -54,6 +54,11 @@ jobs:
         run: |
           python3 tools/verify_auto_indoor_outdoor_loiter.py
 
+      - name: Verify V2 GroundPrep and RTL safety paths
+        if: github.ref_name == 'feature/groundprep-rtl-align-home-v2'
+        run: |
+          python3 tools/verify_groundprep_rtl_align_v2.py
+
       - name: Configure MatekF405-UAV
         run: |
           ./waf configure --board MatekF405-UAV

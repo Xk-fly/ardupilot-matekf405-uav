@@ -752,7 +752,9 @@ bool Copter::autosrc_takeoff_ready()
         // The selected EKF source must actually provide relative XY.
         // A single noisy optical-flow sample should not revoke an otherwise
         // healthy EKF position estimate after the preflight has passed.
-        return filter.flags.horiz_pos_rel &&
+        return optflow.enabled() &&
+               ((AP_HAL::millis() - optflow.last_update()) <= 600U) &&
+               filter.flags.horiz_pos_rel &&
                !filter.flags.horiz_pos_abs &&
                !filter.flags.const_pos_mode;
     }

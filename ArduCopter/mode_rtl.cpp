@@ -617,6 +617,7 @@ bool ModeRTL::get_wp(Location& destination) const
     switch (_state) {
     case SubMode::STARTING:
     case SubMode::INITIAL_CLIMB:
+    case SubMode::ALIGN_HOME:
     case SubMode::RETURN_HOME:
     case SubMode::LOITER_AT_HOME:
     case SubMode::FINAL_DESCENT:
