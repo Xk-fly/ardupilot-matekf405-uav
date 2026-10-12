@@ -30,7 +30,7 @@ tests = {
     "RTL align enum + handlers": 'ALIGN_HOME,' in h
        and r.count('case SubMode::ALIGN_HOME:') >= 3,
     "RTL stationary controller": 'void ModeRTL::align_home_run()' in r
-       and 'wp_nav->update_wpnav();' in r and 'pos_control->update_z_controller();' in r,
+       and 'wp_nav->update_wpnav()' in r and 'pos_control->update_z_controller();' in r,
     "RTL yaw shortest path": 'wrap_180_cd(_align_home_target_cd - ahrs.yaw_sensor)' in r,
     "no near-Home bypass": 'distance_m >= 0.05f' in r,
     "RTL timeout": '_align_home_start_ms >= 8000U' in r,
