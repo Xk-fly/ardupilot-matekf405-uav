@@ -1377,6 +1377,7 @@ public:
     enum class SubMode : uint8_t {
         STARTING,
         INITIAL_CLIMB,
+        ALIGN_HOME,
         RETURN_HOME,
         LOITER_AT_HOME,
         FINAL_DESCENT,
@@ -1418,6 +1419,8 @@ protected:
 private:
 
     void climb_start();
+    void align_home_start();
+    void align_home_run();
     void return_start();
     void climb_return_run();
     void loiterathome_start();
@@ -1427,6 +1430,9 @@ private:
 
     SubMode _state = SubMode::INITIAL_CLIMB;  // records state of rtl (initial climb, returning home, etc)
     bool _state_complete = false; // set to true if the current state is completed
+    uint32_t _align_home_start_ms = 0U;
+    uint32_t _align_home_yaw_ok_since_ms = 0U;
+    int32_t _align_home_target_cd = 0;
 
     struct {
         // NEU w/ Z element alt-above-ekf-origin unless use_terrain is true in which case Z element is alt-above-terrain

@@ -75,6 +75,15 @@ void ModeRTL::run(bool disarm_on_land)
             climb_start();
             break;
         case SubMode::INITIAL_CLIMB:
+            // Apply yaw-before-translation only to *normal* RTL.
+            // SmartRTL and AUTO RTL keep their native state path.
+            if (copter.flightmode == &copter.mode_rtl) {
+                align_home_start();
+            } else {
+                return_start();
+            }
+            break;
+        case SubMode::ALIGN_HOME:
             return_start();
             break;
         case SubMode::RETURN_HOME:
@@ -108,6 +117,10 @@ void ModeRTL::run(bool disarm_on_land)
         climb_return_run();
         break;
 
+    case SubMode::ALIGN_HOME:
+        align_home_run();
+        break;
+
     case SubMode::RETURN_HOME:
         climb_return_run();
         break;
@@ -133,7 +146,12 @@ void ModeRTL::climb_start()
     _state_complete = false;
 
     // set the destination
-    if (!wp_nav->set_wp_destination_loc(rtl_path.climb_target) || !wp_nav->set_wp_destination_next_loc(rtl_path.return_target)) {
+    // For normal RTL do not preload the next return waypoint: cornering
+    // lookahead could start horizontal travel before ALIGN_HOME finishes.
+    // Other RTL callers (AUTO/SmartRTL) retain the original behaviour.
+    if (!wp_nav->set_wp_destination_loc(rtl_path.climb_target) ||
+        ((copter.flightmode != &copter.mode_rtl) &&
+         !wp_nav->set_wp_destination_next_loc(rtl_path.return_target))) {
         // this should not happen because rtl_build_path will have checked terrain data was available
         gcs().send_text(MAV_SEVERITY_CRITICAL,"RTL: unexpected error setting climb target");
         LOGGER_WRITE_ERROR(LogErrorSubsystem::NAVIGATION, LogErrorCode::FAILED_TO_SET_DESTINATION);
@@ -143,6 +161,79 @@ void ModeRTL::climb_start()
 
     // hold current yaw during initial climb
     auto_yaw.set_mode(AutoYaw::Mode::HOLD);
+}
+
+// Hold the completed RTL climb waypoint while rotating to face the actual
+// return target (Home or an active rally point). Do not translate horizontally.
+void ModeRTL::align_home_start()
+{
+    _state = SubMode::ALIGN_HOME;
+    _state_complete = false;
+    _align_home_start_ms = millis();
+    _align_home_yaw_ok_since_ms = 0U;
+
+    // Reissue the climb target without a next waypoint, explicitly ending
+    // WPNav cornering lookahead. The vehicle maintains altitude and XY hold.
+    if (!wp_nav->set_wp_destination_loc(rtl_path.climb_target)) {
+        restart_without_terrain();
+        return;
+    }
+
+    // Compute yaw ONCE: changing the bearing every frame near Home creates
+    // heading chatter. Even when close to Home, we still enter this state.
+    // Only coincident (<5cm) coordinates lack a geometric Home bearing.
+    const Location &from = copter.current_loc;
+    const float distance_m = from.get_distance(rtl_path.return_target);
+    _align_home_target_cd = (distance_m >= 0.05f) ?
+        from.get_bearing_to(rtl_path.return_target) :
+        int32_t(ahrs.yaw_sensor);
+    const int32_t delta_cd = wrap_180_cd(_align_home_target_cd - ahrs.yaw_sensor);
+    auto_yaw.set_mode(AutoYaw::Mode::HOLD);
+    // Relative signed shortest-path turn from current vehicle heading.
+    auto_yaw.set_fixed_yaw(delta_cd * 0.01f, 0.0f, 0, true);
+
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                  "RTL ALIGN_HOME bearing %.1f delta %.1f",
+                  double(_align_home_target_cd * 0.01f),
+                  double(delta_cd * 0.01f));
+}
+
+void ModeRTL::align_home_run()
+{
+    if (is_disarmed_or_landed()) {
+        make_safe_ground_handling();
+        return;
+    }
+
+    motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
+    copter.failsafe_terrain_set_status(wp_nav->update_wpnav());
+    pos_control->update_z_controller();
+    attitude_control->input_thrust_vector_heading(
+        pos_control->get_thrust_vector(), auto_yaw.get_heading());
+
+    // Completion demands both the yaw command finishing its slew and the
+    // measured aircraft yaw within 5 degrees for 300ms.
+    const bool yaw_ok =
+        auto_yaw.reached_fixed_yaw_target() &&
+        (abs(wrap_180_cd(ahrs.yaw_sensor - _align_home_target_cd)) <= 500);
+    if (yaw_ok) {
+        if (_align_home_yaw_ok_since_ms == 0U) {
+            _align_home_yaw_ok_since_ms = millis();
+        } else if (millis() - _align_home_yaw_ok_since_ms >= 300U) {
+            _state_complete = true;
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RTL ALIGN_HOME complete");
+        }
+    } else {
+        _align_home_yaw_ok_since_ms = 0U;
+    }
+
+    // A bad compass/yaw servo must not deadlock the RTL indefinitely.
+    // Fall back to the original RTL translation if alignment times out;
+    // native position/terrain failsafe protection remains in force.
+    if (!_state_complete && (millis() - _align_home_start_ms >= 8000U)) {
+        _state_complete = true;
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "RTL ALIGN_HOME timeout; returning");
+    }
 }
 
 // rtl_return_start - initialise return to home

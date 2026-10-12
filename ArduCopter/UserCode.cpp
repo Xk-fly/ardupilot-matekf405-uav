@@ -35,13 +35,21 @@
 #define AUTOSRC_GPS_SOURCE_SET 0U
 #define AUTOSRC_FLOW_SOURCE_SET 1U
 #define AUTOSRC_STANDBY_SOURCE_SET 2U
-#define AUTOSRC_PREP_NAV_HOLD_MS 600U
-#define AUTOSRC_PREP_NAV_TIMEOUT_MS 8000U
-#define AUTOSRC_PREP_Z_OUTPUT_SETTLE_MS 300U
-#define AUTOSRC_PREP_Z_HOLD_MS 2000U
-#define AUTOSRC_PREP_Z_TIMEOUT_MS 5000U
-#define AUTOSRC_PREP_MAX_VZ_CMS 25.0f
-#define AUTOSRC_PREP_MAX_Z_DRIFT_CM 40.0f
+// Tolerant preflight acquisition: raw Flow must NOT be used as the sole
+// arm gate.  EKF navigation and native ArduPilot checks remain mandatory.
+#define AUTOSRC_PREP_NAV_HOLD_MS 400U
+#define AUTOSRC_PREP_NAV_TIMEOUT_MS 10000U
+#define AUTOSRC_PREP_FLOW_GROUND_HOLD_MS 400U
+#define AUTOSRC_PREP_Z_OUTPUT_SETTLE_MS 1000U
+#define AUTOSRC_PREP_Z_HOLD_MS 1000U
+#define AUTOSRC_PREP_Z_TIMEOUT_MS 10000U
+#define AUTOSRC_PREP_MAX_VZ_CMS 35.0f
+#define AUTOSRC_PREP_MAX_Z_CM 150.0f
+#define AUTOSRC_PREP_MAX_Z_DRIFT_CM 100.0f
+#define AUTOSRC_PREP_MAX_Z_BARO_DELTA_CM 100.0f
+#define AUTOSRC_PREP_SEVERE_Z_CM 300.0f
+#define AUTOSRC_PREP_SEVERE_VZ_CMS 100.0f
+#define AUTOSRC_PREP_READY_LOSS_HOLD_MS 1000U
 #define AUTOSRC_GPS_MIN_SATS 6U
 #define AUTOSRC_GPS_MAX_HDOP 250U
 #define AUTOSRC_GPS_RAW_HOLD_MS 3000U
@@ -280,6 +288,7 @@ static GroundPrepState ground_prep_state = GroundPrepState::STANDBY;
 static uint32_t ground_prep_stage_ms = 0U;
 static uint32_t ground_prep_nav_since_ms = 0U;
 static uint32_t ground_prep_z_eval_since_ms = 0U;
+static uint32_t ground_prep_ready_bad_since_ms = 0U;
 static bool ground_prep_flow_fallback_used = false;
 static uint8_t ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
 static bool ground_prep_onekey = false;
@@ -654,15 +663,18 @@ void Copter::takeoff_prep_request(const bool from_onekey)
     if (motors->armed() || !ap.land_complete || flightmode != &mode_loiter) {
         return;
     }
-    if (!ground_prep_config_valid ||
-        ground_prep_state == GroundPrepState::FAILED) {
+    if (!ground_prep_config_valid) {
         return;
     }
-    if (ground_prep_state == GroundPrepState::STANDBY) {
+    // FAILED is scoped to one request, not a latched fault until reboot.
+    // Only an explicit manual/OneKey request restarts selection.
+    if (ground_prep_state == GroundPrepState::STANDBY ||
+        ground_prep_state == GroundPrepState::FAILED) {
         ground_prep_state = GroundPrepState::SELECT;
         ground_prep_stage_ms = AP_HAL::millis();
         ground_prep_nav_since_ms = 0U;
         ground_prep_z_eval_since_ms = 0U;
+        ground_prep_ready_bad_since_ms = 0U;
         ground_prep_flow_fallback_used = false;
         ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
         ground_prep_onekey = from_onekey;
@@ -701,6 +713,7 @@ void Copter::takeoff_prep_reset()
     ground_prep_stage_ms = 0U;
     ground_prep_nav_since_ms = 0U;
     ground_prep_z_eval_since_ms = 0U;
+    ground_prep_ready_bad_since_ms = 0U;
     ground_prep_flow_fallback_used = false;
     ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
     ground_prep_onekey = false;
@@ -713,7 +726,7 @@ bool Copter::takeoff_prep_vertical_ready() const
     return (ground_prep_state == GroundPrepState::READY) &&
            barometer.healthy() && ap.land_complete &&
            // Catch a bad Z jump after ARM but before either type of takeoff.
-           fabsf(inertial_nav.get_position_z_up_cm()) <= 100.0f &&
+           fabsf(inertial_nav.get_position_z_up_cm()) <= AUTOSRC_PREP_MAX_Z_CM &&
            fabsf(inertial_nav.get_velocity_z_up_cms()) <= AUTOSRC_PREP_MAX_VZ_CMS;
 #else
     return true;
@@ -736,8 +749,10 @@ bool Copter::autosrc_takeoff_ready()
     if (source_set == AUTOSRC_FLOW_SOURCE_SET) {
         // GPS navigation also reports horiz_pos_rel, so require that absolute
         // GPS position is no longer the active aiding mode.
-        return autosrc_flow_ground_ready_cached &&
-               filter.flags.horiz_pos_rel &&
+        // The selected EKF source must actually provide relative XY.
+        // A single noisy optical-flow sample should not revoke an otherwise
+        // healthy EKF position estimate after the preflight has passed.
+        return filter.flags.horiz_pos_rel &&
                !filter.flags.horiz_pos_abs &&
                !filter.flags.const_pos_mode;
     }
@@ -1367,7 +1382,7 @@ void Copter::userhook_50Hz()
         ((onekey_now_ms - autosrc_gps_nav_since_ms) >= AUTOSRC_GPS_NAV_CONFIRM_MS);
     const bool autosrc_flow_ground_ready =
         (autosrc_flow_ground_since_ms != 0U) &&
-        ((onekey_now_ms - autosrc_flow_ground_since_ms) >= AUTOSRC_FLOW_READY_HOLD_MS);
+        ((onekey_now_ms - autosrc_flow_ground_since_ms) >= AUTOSRC_PREP_FLOW_GROUND_HOLD_MS);
     const bool autosrc_flow_air_ready =
         (autosrc_flow_air_since_ms != 0U) &&
         ((onekey_now_ms - autosrc_flow_air_since_ms) >= AUTOSRC_FLOW_READY_HOLD_MS);
@@ -1484,65 +1499,101 @@ void Copter::userhook_50Hz()
                 GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "GroundPrep nav timeout");
             }
         } else if (ground_prep_state == GroundPrepState::VERIFY_Z) {
-            // The EKF output predictor can lag its reset state.  Permit a
-            // short propagation period, then start a fresh 2s window using
-            // the synchronised values.  Never count the settle time as READY.
-            if (onekey_now_ms - ground_prep_stage_ms <
+            // A successful height-datum reset can take time to propagate
+            // through the EKF output predictor. Ignore only the first
+            // second; do not count it as a valid stable interval.
+            if (onekey_now_ms - ground_prep_stage_ms >=
                 AUTOSRC_PREP_Z_OUTPUT_SETTLE_MS) {
-                // Keep waiting with motors disarmed.
-            } else if (ground_prep_z_eval_since_ms == 0U) {
-                ground_prep_z_eval_since_ms = onekey_now_ms;
-                ground_prep_z_start_cm = inertial_nav.get_position_z_up_cm();
-                ground_prep_baro_start_cm = float(baro_alt);
-            } else {
-            const float dz = inertial_nav.get_position_z_up_cm() -
-                             ground_prep_z_start_cm;
-            const float db = float(baro_alt) - ground_prep_baro_start_cm;
-            const bool vertical_ok =
-                barometer.healthy() &&
-                // Reset must establish an actual near-zero local datum;
-                // a stable but still -10m EKF estimate is NOT Ready.
-                (fabsf(inertial_nav.get_position_z_up_cm()) <= 100.0f) &&
-                (fabsf(inertial_nav.get_velocity_z_up_cms()) <=
-                 AUTOSRC_PREP_MAX_VZ_CMS) &&
-                (fabsf(dz) <= AUTOSRC_PREP_MAX_Z_DRIFT_CM) &&
-                (fabsf(db) <= AUTOSRC_PREP_MAX_Z_DRIFT_CM) &&
-                (fabsf(dz-db) <= AUTOSRC_PREP_MAX_Z_DRIFT_CM);
-            const bool nav_ok =
-                (AP::ahrs().get_posvelyaw_source_set() == ground_prep_chosen_source) &&
+                const float z_cm = inertial_nav.get_position_z_up_cm();
+                const float vz_cms = inertial_nav.get_velocity_z_up_cms();
+                const float baro_cm = float(baro_alt);
+                const bool nav_ok =
+                    (AP::ahrs().get_posvelyaw_source_set() == ground_prep_chosen_source) &&
+                    !autosrc_filter.flags.const_pos_mode &&
+                    ((ground_prep_chosen_source == AUTOSRC_GPS_SOURCE_SET) ?
+                        autosrc_gps_nav_now :
+                        (autosrc_filter.flags.horiz_pos_rel &&
+                         !autosrc_filter.flags.horiz_pos_abs));
+                // Fail closed for a *grossly* invalid vertical estimator.
+                // A 40cm EKF predictor transient is not a gross failure;
+                // the 10m preflight divergence from the previous incident is.
+                const bool severe_z =
+                    !isfinite(z_cm) || !isfinite(vz_cms) ||
+                    (fabsf(z_cm) > AUTOSRC_PREP_SEVERE_Z_CM) ||
+                    (fabsf(vz_cms) > AUTOSRC_PREP_SEVERE_VZ_CMS);
+                if (severe_z) {
+                    ground_prep_state = GroundPrepState::FAILED;
+                    GCS_SEND_TEXT(MAV_SEVERITY_ERROR,
+                                  "GroundPrep unsafe Z %.0f Vz %.0f",
+                                  double(z_cm), double(vz_cms));
+                } else {
+                    const bool vertical_now =
+                        barometer.healthy() &&
+                        isfinite(baro_cm) &&
+                        (fabsf(z_cm) <= AUTOSRC_PREP_MAX_Z_CM) &&
+                        (fabsf(vz_cms) <= AUTOSRC_PREP_MAX_VZ_CMS);
+                    if (!nav_ok || !vertical_now) {
+                        // Reset the 1s stable window, not the entire user
+                        // request. Restart the baseline after recovery.
+                        ground_prep_z_eval_since_ms = 0U;
+                    } else if (ground_prep_z_eval_since_ms == 0U) {
+                        ground_prep_z_eval_since_ms = onekey_now_ms;
+                        ground_prep_z_start_cm = z_cm;
+                        ground_prep_baro_start_cm = baro_cm;
+                    } else {
+                        const float dz = z_cm - ground_prep_z_start_cm;
+                        const float db = baro_cm - ground_prep_baro_start_cm;
+                        const bool stable =
+                            (fabsf(dz) <= AUTOSRC_PREP_MAX_Z_DRIFT_CM) &&
+                            (fabsf(db) <= AUTOSRC_PREP_MAX_Z_DRIFT_CM) &&
+                            (fabsf(dz - db) <= AUTOSRC_PREP_MAX_Z_BARO_DELTA_CM);
+                        if (!stable) {
+                            ground_prep_z_eval_since_ms = 0U;
+                        } else if (onekey_now_ms - ground_prep_z_eval_since_ms >=
+                                   AUTOSRC_PREP_Z_HOLD_MS) {
+                            ground_prep_state = GroundPrepState::READY;
+                            ground_prep_ready_bad_since_ms = 0U;
+                            GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                                          "GroundPrep vertical READY");
+                        }
+                    }
+                }
+            }
+            if (ground_prep_state == GroundPrepState::VERIFY_Z &&
+                (onekey_now_ms - ground_prep_stage_ms >=
+                 AUTOSRC_PREP_Z_TIMEOUT_MS)) {
+                ground_prep_state = GroundPrepState::FAILED;
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                              "GroundPrep Z wait timeout q%u z%.0f vz%.0f",
+                              unsigned(optflow.quality()),
+                              double(inertial_nav.get_position_z_up_cm()),
+                              double(inertial_nav.get_velocity_z_up_cms()));
+            }
+        } else if (ground_prep_state == GroundPrepState::READY) {
+            // Brief Flow/Baro fluctuations do not permanently latch FAILED.
+            // Do not start flying unless the EKF still reports a valid
+            // horizontal position; native position_ok checks remain active.
+            const bool source_ok =
+                (ground_prep_chosen_source == AP::ahrs().get_posvelyaw_source_set()) &&
+                !autosrc_filter.flags.const_pos_mode &&
                 ((ground_prep_chosen_source == AUTOSRC_GPS_SOURCE_SET) ?
                     autosrc_gps_nav_now :
                     (autosrc_filter.flags.horiz_pos_rel &&
-                     autosrc_flow_ground_ready &&
-                     !autosrc_filter.flags.horiz_pos_abs)) &&
-                !autosrc_filter.flags.const_pos_mode;
-            if (!vertical_ok || !nav_ok) {
+                     !autosrc_filter.flags.horiz_pos_abs));
+            const bool vert_ok = barometer.healthy() &&
+                isfinite(inertial_nav.get_position_z_up_cm()) &&
+                isfinite(inertial_nav.get_velocity_z_up_cms()) &&
+                (fabsf(inertial_nav.get_position_z_up_cm()) <= AUTOSRC_PREP_MAX_Z_CM) &&
+                (fabsf(inertial_nav.get_velocity_z_up_cms()) <= AUTOSRC_PREP_MAX_VZ_CMS);
+            if (source_ok && vert_ok) {
+                ground_prep_ready_bad_since_ms = 0U;
+            } else if (ground_prep_ready_bad_since_ms == 0U) {
+                ground_prep_ready_bad_since_ms = onekey_now_ms;
+            } else if (onekey_now_ms - ground_prep_ready_bad_since_ms >=
+                       AUTOSRC_PREP_READY_LOSS_HOLD_MS) {
                 ground_prep_state = GroundPrepState::FAILED;
-                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "GroundPrep vertical/nav unstable");
-            } else if (onekey_now_ms - ground_prep_z_eval_since_ms >=
-                       AUTOSRC_PREP_Z_HOLD_MS) {
-                ground_prep_state = GroundPrepState::READY;
-                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GroundPrep vertical READY");
-            } else if (onekey_now_ms - ground_prep_stage_ms >
-                       AUTOSRC_PREP_Z_TIMEOUT_MS) {
-                ground_prep_state = GroundPrepState::FAILED;
-            }
-            } // post-reset output synchronization completed
-        } else if (ground_prep_state == GroundPrepState::READY) {
-            // Losing navigation or vertical readiness before ARM invalidates
-            // the one-time preparation. Next explicit request starts afresh.
-            const bool source_ok = (ground_prep_chosen_source ==
-                                   AP::ahrs().get_posvelyaw_source_set()) &&
-                                  ((ground_prep_chosen_source == AUTOSRC_GPS_SOURCE_SET) ?
-                                   (autosrc_gps_nav_ready && autosrc_gps_raw_ready) :
-                                   (autosrc_flow_ground_ready &&
-                                    autosrc_filter.flags.horiz_pos_rel &&
-                                    !autosrc_filter.flags.horiz_pos_abs));
-            if (!source_ok || !barometer.healthy() ||
-                fabsf(inertial_nav.get_velocity_z_up_cms()) >
-                    AUTOSRC_PREP_MAX_VZ_CMS) {
-                ground_prep_state = GroundPrepState::FAILED;
-                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "GroundPrep readiness lost");
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                              "GroundPrep readiness lost");
             }
         }
     } else if (motors->armed() && !ap.land_complete) {

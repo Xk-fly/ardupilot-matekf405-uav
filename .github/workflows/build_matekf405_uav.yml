@@ -10,6 +10,7 @@ on:
       - feature/bidirectional-auto-flow-gps
       - feature/gps-home-freeze-gimbal20
       - feature/ground-standby-vertical-safety
+      - feature/groundprep-rtl-align-home-v2
   workflow_dispatch:
 
 permissions:
