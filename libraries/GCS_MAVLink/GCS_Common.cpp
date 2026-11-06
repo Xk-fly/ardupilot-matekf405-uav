@@ -3871,6 +3871,23 @@ void GCS_MAVLINK::handle_can_frame(const mavlink_message_t &msg) const
 
 void GCS_MAVLINK::handle_distance_sensor(const mavlink_message_t &msg)
 {
+#if defined(HAL_MATEKF405_UAV) && HAL_MATEKF405_UAV
+    // MT-06 V3 is only enabled on the custom MatekF405-UAV target:
+    //   physical UART3 == SERIAL1 == MT-06 (downward rangefinder).
+    //   SERIAL4 == original PMW3901/VL53L1CX MAVLink module.
+    //
+    // The legacy module emits downward DISTANCE_SENSOR and OPTICAL_FLOW.
+    // RangeFinder's MAVLink backend does not distinguish source UARTs.
+    // Accept downward ranging ONLY from SERIAL1; optical flow unaffected.
+    // Non-downward DISTANCE_SENSOR messages retain their original routing.
+    mavlink_distance_sensor_t distance_sensor;
+    mavlink_msg_distance_sensor_decode(&msg, &distance_sensor);
+    if (distance_sensor.orientation == static_cast<uint8_t>(ROTATION_PITCH_270) &&
+        get_uart() != AP::serialmanager().get_serial_by_id(1U)) {
+        return;
+    }
+#endif
+
 #if AP_RANGEFINDER_ENABLED
     RangeFinder *rangefinder = AP::rangefinder();
     if (rangefinder != nullptr) {
