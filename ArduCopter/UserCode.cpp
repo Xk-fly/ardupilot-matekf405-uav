@@ -38,7 +38,9 @@
 // Tolerant preflight acquisition: raw Flow must NOT be used as the sole
 // arm gate.  EKF navigation and native ArduPilot checks remain mandatory.
 #define AUTOSRC_PREP_NAV_HOLD_MS 400U
-#define AUTOSRC_PREP_NAV_TIMEOUT_MS 10000U
+// Permit the first relative optical-flow EKF alignment without unsafe shortcuts.
+#define AUTOSRC_PREP_NAV_TIMEOUT_MS 20000U
+#define AUTOSRC_PREP_SELECT_TIMEOUT_MS 20000U
 #define AUTOSRC_PREP_FLOW_GROUND_HOLD_MS 400U
 #define AUTOSRC_PREP_Z_OUTPUT_SETTLE_MS 1000U
 #define AUTOSRC_PREP_Z_HOLD_MS 1000U
@@ -289,7 +291,6 @@ static uint32_t ground_prep_stage_ms = 0U;
 static uint32_t ground_prep_nav_since_ms = 0U;
 static uint32_t ground_prep_z_eval_since_ms = 0U;
 static uint32_t ground_prep_ready_bad_since_ms = 0U;
-static bool ground_prep_flow_fallback_used = false;
 static uint8_t ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
 static bool ground_prep_onekey = false;
 static bool ground_prep_config_valid = false;
@@ -675,7 +676,6 @@ void Copter::takeoff_prep_request(const bool from_onekey)
         ground_prep_nav_since_ms = 0U;
         ground_prep_z_eval_since_ms = 0U;
         ground_prep_ready_bad_since_ms = 0U;
-        ground_prep_flow_fallback_used = false;
         ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
         ground_prep_onekey = from_onekey;
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GroundPrep requested");
@@ -714,7 +714,6 @@ void Copter::takeoff_prep_reset()
     ground_prep_nav_since_ms = 0U;
     ground_prep_z_eval_since_ms = 0U;
     ground_prep_ready_bad_since_ms = 0U;
-    ground_prep_flow_fallback_used = false;
     ground_prep_chosen_source = AUTOSRC_STANDBY_SOURCE_SET;
     ground_prep_onekey = false;
 #endif
@@ -1446,18 +1445,22 @@ void Copter::userhook_50Hz()
             }
             autosrc_state = AutoSourceState::INIT;
         } else if (ground_prep_state == GroundPrepState::SELECT) {
-            const uint8_t chosen =
-                autosrc_flow_ground_ready ? AUTOSRC_FLOW_SOURCE_SET :
-                autosrc_gps_raw_ready ? AUTOSRC_GPS_SOURCE_SET :
-                AUTOSRC_STANDBY_SOURCE_SET;
-            if (chosen != AUTOSRC_STANDBY_SOURCE_SET) {
-                ground_prep_chosen_source = chosen;
-                autosrc_select_source(chosen, "takeoff select");
-                autosrc_state = (chosen == AUTOSRC_FLOW_SOURCE_SET) ?
-                    AutoSourceState::FLOW_GROUND : AutoSourceState::GPS_GROUND;
+            // V4: all ground takeoff preparation uses SRC2 Flow. GPS is
+            // still enabled for airborne handover and RTL, but is not a
+            // ground fallback when relative navigation is late.
+            if (autosrc_flow_ground_ready) {
+                ground_prep_chosen_source = AUTOSRC_FLOW_SOURCE_SET;
+                autosrc_select_source(AUTOSRC_FLOW_SOURCE_SET, "takeoff Flow");
+                autosrc_state = AutoSourceState::FLOW_GROUND;
                 ground_prep_stage_ms = onekey_now_ms;
                 ground_prep_nav_since_ms = 0U;
                 ground_prep_state = GroundPrepState::WAIT_NAV;
+            } else if (onekey_now_ms - ground_prep_stage_ms >=
+                       AUTOSRC_PREP_SELECT_TIMEOUT_MS) {
+                ground_prep_state = GroundPrepState::FAILED;
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                              "GroundPrep Flow/range not ready q%u",
+                              unsigned(optflow.quality()));
             }
         } else if (ground_prep_state == GroundPrepState::WAIT_NAV) {
             const bool nav_ok =
@@ -1471,34 +1474,41 @@ void Copter::userhook_50Hz()
             update_hold(nav_ok, ground_prep_nav_since_ms);
             if (nav_ok && ground_prep_nav_since_ms != 0U &&
                 (onekey_now_ms - ground_prep_nav_since_ms >= AUTOSRC_PREP_NAV_HOLD_MS)) {
-                // Only while still disarmed and landed. Return false -> fail
-                // closed, never fabricate healthy EKF altitude.
-                if (!barometer.healthy() || !AP::ahrs().resetHeightDatum()) {
+                // The EKF public origin is fixed. A later height datum
+                // reset can silently change the LOCAL origin to the new GPS
+                // altitude, leaving the public Z offset by several metres.
+                // Preserve an existing origin on every subsequent arm cycle.
+                // Retain first-time datum reset ONLY before any EKF origin.
+                // Crucially, VERIFY_Z and native arming checks remain strict.
+                Location ekf_origin;
+                const bool origin_established = AP::ahrs().get_origin(ekf_origin);
+                if (!barometer.healthy()) {
+                    ground_prep_state = GroundPrepState::FAILED;
+                    GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "GroundPrep baro unhealthy");
+                } else if (!origin_established && !AP::ahrs().resetHeightDatum()) {
                     ground_prep_state = GroundPrepState::FAILED;
                     GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "GroundPrep height reset failed");
                 } else {
                     ground_prep_state = GroundPrepState::VERIFY_Z;
                     ground_prep_stage_ms = onekey_now_ms;
                     ground_prep_z_eval_since_ms = 0U;
-                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GroundPrep height reset OK");
+                    if (origin_established) {
+                        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                                      "GroundPrep keep origin Z%.0f H%.1f",
+                                      double(inertial_nav.get_position_z_up_cm()),
+                                      double(ekf_origin.alt * 0.01f));
+                    } else {
+                        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+                                      "GroundPrep first height reset OK");
+                    }
                 }
-            } else if (ground_prep_chosen_source == AUTOSRC_FLOW_SOURCE_SET &&
-                       !ground_prep_flow_fallback_used &&
-                       autosrc_gps_raw_ready &&
-                       (onekey_now_ms - ground_prep_stage_ms >= 3000U)) {
-                // Flow can report good raw quality yet fail to establish
-                // relative navigation.  One GPS fallback per user request,
-                // never a periodic or automatic disarmed feedback loop.
-                ground_prep_flow_fallback_used = true;
-                ground_prep_chosen_source = AUTOSRC_GPS_SOURCE_SET;
-                autosrc_select_source(AUTOSRC_GPS_SOURCE_SET, "prep Flow nav timeout");
-                autosrc_state = AutoSourceState::GPS_GROUND;
-                ground_prep_stage_ms = onekey_now_ms;
-                ground_prep_nav_since_ms = 0U;
+
             } else if (onekey_now_ms - ground_prep_stage_ms >
                        AUTOSRC_PREP_NAV_TIMEOUT_MS) {
                 ground_prep_state = GroundPrepState::FAILED;
-                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "GroundPrep nav timeout");
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                              "GroundPrep Flow nav timeout q%u",
+                              unsigned(optflow.quality()));
             }
         } else if (ground_prep_state == GroundPrepState::VERIFY_Z) {
             // A successful height-datum reset can take time to propagate
